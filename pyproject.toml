@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "inferra"
+version = "0.3.0"
+description = "Autonomous debugging engine — trace-to-code correlation via AST analysis and LLM synthesis"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Deep Gori"},
+]
+keywords = [
+    "observability",
+    "debugging",
+    "tracing",
+    "opentelemetry",
+    "otlp",
+    "root-cause-analysis",
+    "ast",
+    "code-indexing",
+    "context-engineering",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+    "Framework :: AsyncIO",
+]
+dependencies = [
+    "networkx>=3.0",
+    "anthropic>=0.80.0",
+    "protobuf>=4.0",
+]
+
+[project.optional-dependencies]
+aws = ["boto3>=1.34.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["async_content_tracer*", "inferra*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests that take >1s",
+]
+
+[tool.coverage.run]
+source = ["inferra", "async_content_tracer"]
+omit = ["tests/*", "demo.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
