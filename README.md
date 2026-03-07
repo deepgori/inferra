@@ -1,5 +1,7 @@
 # Inferra — Autonomous Debugging via Trace-to-Code Correlation
 
+[![Tests](https://github.com/deepgori/inferra/actions/workflows/tests.yml/badge.svg)](https://github.com/deepgori/inferra/actions/workflows/tests.yml)
+
 **Turn production traces into code-level diagnoses. Automatically.**
 
 Inferra bridges the gap between observability tools (which show _what_ happened) and source code (which shows _why_ it happened). It ingests standard [OpenTelemetry](https://opentelemetry.io/) traces, maps each span to the exact function and line in your codebase via AST analysis, and produces a structured root cause analysis.
@@ -120,10 +122,11 @@ FastAPIInstrumentor.instrument_app(app)
 curl -X POST http://localhost:4318/v1/analyze
 ```
 
-Inferra generates an HTML report at `reports/` with:
-- Execution call trees with timing
-- Code correlations (file:line for each span)
-- AI-powered root cause analysis referencing specific code
+Inferra generates an interactive HTML report:
+
+![Telemetry overview with span statistics and entry point discovery](docs/report_overview.png)
+
+![Execution graph with code correlations — POST /api/users/login → auth.py:36](docs/report_correlation.png)
 
 ## Code Indexer — The Core
 
