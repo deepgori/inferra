@@ -317,7 +317,7 @@ class OTLPHandler(BaseHTTPRequestHandler):
             try:
                 trace_events = spans_to_tracer_events(spans)
 
-                # ── RAG correlation: map spans to source code BEFORE LLM ──
+                # ── Stage 1: Map spans to source code via 4-stage cascade ──
                 source_map = {}  # span_name → {file, line, full_code}
                 code_context = ""
                 if _indexer:
@@ -334,6 +334,38 @@ class OTLPHandler(BaseHTTPRequestHandler):
                             "\n\nSOURCE CODE for correlated spans:\n"
                             + "\n\n".join(code_sections)
                         )
+
+                    # ── Stage 2: RAG retrieval for causal chains ──
+                    # Build execution graph for causal chain analysis
+                    try:
+                        from inferra.rag import RAGPipeline
+                        from async_content_tracer.graph import ExecutionGraph
+
+                        graph = ExecutionGraph()
+                        graph.build_from_events(trace_events)
+                        rag = RAGPipeline(_indexer, max_code_results=3)
+
+                        # Retrieve context for error spans
+                        rag_sections = []
+                        for node in graph.nodes.values():
+                            if getattr(node, 'error', None):
+                                ctx = rag.retrieve_for_error(node, graph)
+                                if ctx.causal_chain:
+                                    chain_str = " → ".join(
+                                        n.name for n in ctx.causal_chain[:5]
+                                    )
+                                    rag_sections.append(
+                                        f"Causal chain for {node.name}: "
+                                        f"{chain_str}"
+                                    )
+
+                        if rag_sections:
+                            code_context += (
+                                "\n\nCAUSAL ANALYSIS (from execution graph):\n"
+                                + "\n".join(rag_sections)
+                            )
+                    except Exception as e:
+                        log.debug("RAG retrieval skipped: %s", e)
 
                 # ── LLM analysis with code context ──
                 engine = RCAEngine()

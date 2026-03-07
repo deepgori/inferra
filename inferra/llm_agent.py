@@ -93,16 +93,40 @@ def _call_claude(prompt: str, system: str = "", max_tokens: int = 1500) -> Optio
         return None
 
 
-SYSTEM_PROMPT = """You are an expert production systems debugger. You analyze
-execution traces and code to determine the ROOT CAUSE of failures.
+SYSTEM_PROMPT = """You are an expert production systems debugger performing root cause analysis.
 
-Rules:
-- Be specific and concrete — cite function names, file paths, line numbers
-- Explain the causal chain: what triggered what, and why
-- Distinguish symptoms from root causes
-- Provide actionable recommendations (not generic advice)
-- If you're unsure, say so with a confidence level
-- Keep your response concise and structured"""
+You receive two kinds of input:
+1. STRUCTURED FINDINGS from deterministic analyzers (latency, error classification, pattern detection)
+2. CORRELATED SOURCE CODE mapped from trace spans to exact file:line locations via AST analysis
+
+Your job is to synthesize these into a precise diagnosis. Follow this protocol:
+
+## Analysis Protocol
+
+### TIMELINE
+Reconstruct what happened chronologically. Reference span durations and parent-child relationships.
+
+### CODE EVIDENCE
+For each suspicious span, reference the correlated source code by file:line. Identify:
+- Blocking operations in async contexts
+- N+1 query patterns (repeated DB calls in loops)
+- Missing error handling or swallowed exceptions
+- Synchronous calls that should be async
+- Resource leaks (unclosed connections, files)
+
+### HYPOTHESIS
+State your working hypothesis. Consider at least two alternative explanations before settling on one.
+Explicitly reason: "The evidence supports X because..., but Y is also possible if..."
+
+### VERDICT
+State the root cause with a confidence level (HIGH/MEDIUM/LOW) and justification.
+Format: [CONFIDENCE: HIGH|MEDIUM|LOW] Root cause is...
+
+## Rules
+- Cite specific function names, file paths, and line numbers
+- Distinguish symptoms (what you observe) from causes (why it happens)
+- If evidence is insufficient, say so — never fabricate certainty
+- Keep response under 400 words"""
 
 
 class DeepReasoningAgent(BaseAgent):
@@ -274,12 +298,11 @@ class DeepReasoningAgent(BaseAgent):
         context: Optional[RetrievedContext] = None,
         code_context: str = "",
     ) -> str:
-        """Build a prompt for synthesizing rule-based findings."""
+        """Build a structured prompt for synthesizing rule-based findings."""
         parts = [
-            "## Agent Findings Synthesis\n",
-            "Multiple specialist agents have analyzed an execution trace. "
-            "Their findings are below. Synthesize them into a coherent "
-            "root cause analysis.\n",
+            "## Analyzer Findings\n",
+            "The following findings come from deterministic analyzers "
+            "(not LLM-generated). Each has been verified by code inspection.\n",
         ]
 
         for f in findings:
@@ -289,26 +312,46 @@ class DeepReasoningAgent(BaseAgent):
                 f"- Severity: {f.severity.value}\n"
                 f"- Confidence: {f.confidence:.0%}\n"
                 f"- Evidence: {'; '.join(f.evidence[:3])}\n"
-                f"- Details: {f.details[:200]}"
+                f"- Affected spans: {', '.join(f.affected_spans[:5])}\n"
+                f"- Details: {f.details[:300]}"
             )
+            if f.source_locations:
+                parts.append(
+                    f"- Source: {', '.join(f.source_locations[:3])}"
+                )
 
-        # Inject correlated source code so the LLM can reference specific lines
+        # Add span timing summary from the execution graph
+        parts.append("\n## Span Timing Summary\n")
+        if hasattr(graph, 'nodes') and graph.nodes:
+            sorted_nodes = sorted(
+                graph.nodes.values(),
+                key=lambda n: n.duration_ms if hasattr(n, 'duration_ms') else 0,
+                reverse=True,
+            )
+            for node in sorted_nodes[:10]:
+                dur = getattr(node, 'duration_ms', 0)
+                err = ' [ERROR]' if getattr(node, 'error', None) else ''
+                parts.append(
+                    f"- {node.name}: {dur:.1f}ms{err}"
+                )
+
+        # Inject correlated source code
         if code_context:
             parts.append(
                 "\n## Correlated Source Code\n"
-                "The following source code was mapped from the trace spans. "
-                "Analyze this code for potential issues (N+1 queries, blocking calls, "
-                "missing error handling, inefficient patterns, security concerns).\n"
+                "The following source code was mapped from trace spans via "
+                "AST analysis (not guessed). Each function was resolved from "
+                "route decorators and include_router() prefix chains.\n"
                 f"{code_context}"
             )
 
         parts.append(
             "\n## Task\n"
-            "Synthesize these findings into a coherent narrative:\n"
-            "1. What is the single most likely root cause?\n"
-            "2. Reference specific lines of code that contribute to the issue.\n"
-            "3. What patterns in the code should be improved?\n"
-            "Keep your response under 300 words."
+            "Follow the analysis protocol (TIMELINE → CODE EVIDENCE → "
+            "HYPOTHESIS → VERDICT).\n"
+            "Consider at least two possible causes before concluding.\n"
+            "Cite file:line numbers from the correlated code above.\n"
+            "End with [CONFIDENCE: HIGH|MEDIUM|LOW] and a one-line verdict."
         )
 
         return "\n".join(parts)

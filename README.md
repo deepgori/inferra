@@ -63,12 +63,12 @@ Inferra automates that entire workflow:
 │         ┌───────────────────┼───────────────────┐                       │
 │         ▼                   ▼                   ▼                       │
 │  ┌─────────────┐   ┌───────────────┐   ┌───────────────┐               │
-│  │ Multi-Agent  │   │ LLM Synthesis │   │ HTML Report   │               │
-│  │ RCA Engine   │   │ (Claude)      │   │ Generator     │               │
+│  │ Heuristic   │   │ LLM Synthesis │   │ HTML Report   │               │
+│  │ Analyzers   │   │ (Claude)      │   │ Generator     │               │
 │  │              │   │               │   │               │               │
-│  │ Latency      │   │ Receives full │   │ Call trees    │               │
-│  │ Error detect │   │ code context  │   │ Timing stats  │               │
-│  │ Pattern find │   │ + trace data  │   │ Code links    │               │
+│  │ Latency     │   │ Receives full │   │ Call trees    │               │
+│  │ Error class │   │ code context  │   │ Timing stats  │               │
+│  │ Crit. path  │   │ + findings    │   │ Code links    │               │
 │  └─────────────┘   └───────────────┘   └───────────────┘               │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -161,15 +161,15 @@ async def get(slug: str):
 
 Inferra parses `include_router()` calls across files, builds a prefix chain graph, and resolves the full route path. This is how it matches the OTel span `GET /api/articles/{slug}` to `articles.py:109`.
 
-## Multi-Agent RCA Engine
+## Analysis Pipeline — Heuristics + LLM
 
-Rather than sending raw data to an LLM and hoping for the best, Inferra uses a hybrid approach:
+Rather than sending raw traces to an LLM and hoping for the best, Inferra uses a two-stage approach:
 
-1. **Rule-based specialist agents** run first — detecting slow spans, errors, and patterns with deterministic heuristics
-2. **Findings are structured** with severity, confidence, and evidence
-3. **LLM synthesis** receives both the findings AND the correlated source code, producing a coherent diagnosis that references specific lines
+1. **Rule-based analyzers** run first — a `LogAnalysisAgent` classifies errors and detects cascading failures, a `MetricsCorrelationAgent` finds slow spans and computes the critical path through the execution DAG, and a `PatternAnalysisAgent` identifies common antipatterns (N+1 queries, missing error handlers)
+2. **Findings are structured** into typed objects with severity, confidence scores, evidence chains, and affected span IDs
+3. **LLM synthesis** receives the structured findings AND the correlated source code (full function bodies, not snippets), then produces a coherent diagnosis referencing specific lines
 
-This means the LLM's context is engineered, not dumped. It sees exactly what it needs: the slow span, the function that handles it, and the code inside that function.
+This is not a "multi-agent" system in the LLM-agent sense — the analyzers are deterministic code, not LLM agents. The LLM is called once, at the end, with engineered context. It sees exactly what it needs: the slow span, the heuristic findings about it, and the actual code of the function that handles it.
 
 ## Tested On
 
@@ -188,10 +188,10 @@ inferra/
 ├── indexer.py            # AST-based code indexer + TF-IDF search + prefix resolver
 ├── otlp_receiver.py      # OTLP/HTTP trace receiver + correlator + report generator
 ├── rca_engine.py         # Root cause analysis engine orchestration
-├── agents.py             # Multi-agent coordinator + specialist agents
-├── llm_agent.py          # Claude integration + prompt engineering
-├── rag.py                # Retrieval-augmented generation pipeline
-├── embeddings.py         # TF-IDF + embedding-based code search
+├── agents.py             # Rule-based analyzers (latency, errors, patterns)
+├── llm_agent.py          # Claude integration + structured prompting
+├── rag.py                # Context-aware code retrieval for trace events
+├── embeddings.py         # TF-IDF code search index
 ├── config_indexer.py     # YAML/TOML/.env config file parser
 ├── sql_indexer.py        # SQL file indexer
 └── aws_integration.py    # CloudWatch/X-Ray integration
