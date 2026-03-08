@@ -59,6 +59,30 @@ from gs_quant.timeseries.analysis import (
 )
 from gs_quant.timeseries.helper import Window
 
+# OTel tracing — get a tracer for manual spans
+from opentelemetry import trace
+
+tracer = trace.get_tracer("gsquant.analytics", "1.0.0")
+
+# ── Source paths for code correlation ────────────────────────────────────────
+
+_STATS_FILE = os.path.join(GS_QUANT_DIR, "gs_quant", "timeseries", "statistics.py")
+_ECON_FILE = os.path.join(GS_QUANT_DIR, "gs_quant", "timeseries", "econometrics.py")
+_ANALYSIS_FILE = os.path.join(GS_QUANT_DIR, "gs_quant", "timeseries", "analysis.py")
+
+
+def _span(name, code_file, code_func, code_line=0):
+    """Create a span with code.* semantic attributes for source correlation."""
+    return tracer.start_as_current_span(
+        name,
+        attributes={
+            "code.filepath": code_file,
+            "code.function": code_func,
+            "code.lineno": code_line,
+            "code.namespace": "gs_quant.timeseries",
+        },
+    )
+
 
 # ── Data Layer ───────────────────────────────────────────────────────────────
 
@@ -81,29 +105,31 @@ class DataLoader:
         ticker: str, days: int = 252
     ) -> pd.Series:
         """Generate realistic price series using geometric Brownian motion."""
-        params = DataLoader.TICKERS.get(
-            ticker, {"mu": 0.0005, "sigma": 0.02, "base": 100.0}
-        )
-        np.random.seed(hash(ticker) % 2**31)
-        dates = pd.bdate_range(
-            end=datetime.now(), periods=days, freq="B"
-        )
-        n = len(dates)
-        daily_returns = np.random.normal(
-            params["mu"], params["sigma"], n
-        )
-        price_path = params["base"] * np.exp(np.cumsum(daily_returns))
-        return pd.Series(price_path, index=dates, name=ticker)
+        with _span("DataLoader.generate_price_series", __file__, "generate_price_series"):
+            params = DataLoader.TICKERS.get(
+                ticker, {"mu": 0.0005, "sigma": 0.02, "base": 100.0}
+            )
+            np.random.seed(hash(ticker) % 2**31)
+            dates = pd.bdate_range(
+                end=datetime.now(), periods=days, freq="B"
+            )
+            n = len(dates)
+            daily_returns = np.random.normal(
+                params["mu"], params["sigma"], n
+            )
+            price_path = params["base"] * np.exp(np.cumsum(daily_returns))
+            return pd.Series(price_path, index=dates, name=ticker)
 
     @staticmethod
     def load_portfolio(
         tickers: List[str], days: int = 252
     ) -> Dict[str, pd.Series]:
         """Load price series for multiple tickers."""
-        return {
-            t: DataLoader.generate_price_series(t, days)
-            for t in tickers
-        }
+        with _span("DataLoader.load_portfolio", __file__, "load_portfolio"):
+            return {
+                t: DataLoader.generate_price_series(t, days)
+                for t in tickers
+            }
 
 
 # ── Analytics Engine ─────────────────────────────────────────────────────────
@@ -114,12 +140,23 @@ class AnalyticsEngine:
     @staticmethod
     def compute_returns_analysis(series: pd.Series, window: int = 22):
         """Full returns analysis: simple returns, log returns, stats."""
-        simple_ret = returns(series, 1)
-        # Compute rolling statistics on returns
-        rolling_mean = mean(simple_ret, Window(window, 0))
-        rolling_std = std(simple_ret, Window(window, 0))
-        rolling_min = min_(simple_ret, Window(window, 0))
-        rolling_max = max_(simple_ret, Window(window, 0))
+        with _span("econometrics.returns", _ECON_FILE, "returns", 55):
+            simple_ret = returns(series, 1)
+
+        with _span("statistics.mean", _STATS_FILE, "mean", 38):
+            rolling_mean = mean(simple_ret, Window(window, 0))
+
+        with _span("statistics.std", _STATS_FILE, "std", 92):
+            rolling_std = std(simple_ret, Window(window, 0))
+
+        with _span("statistics.min_", _STATS_FILE, "min_", 131):
+            rolling_min = min_(simple_ret, Window(window, 0))
+
+        with _span("statistics.max_", _STATS_FILE, "max_", 153):
+            rolling_max = max_(simple_ret, Window(window, 0))
+
+        with _span("analysis.count", _ANALYSIS_FILE, "count", 219):
+            obs_count = count(simple_ret)
 
         return {
             "total_return": float(
@@ -133,32 +170,59 @@ class AnalyticsEngine:
             if len(rolling_mean) > 0 else None,
             "current_rolling_std": float(rolling_std.iloc[-1] * 100)
             if len(rolling_std) > 0 else None,
-            "observations": int(count(simple_ret).iloc[-1])
-            if len(count(simple_ret)) > 0 else 0,
+            "observations": int(obs_count.iloc[-1])
+            if len(obs_count) > 0 else 0,
         }
 
     @staticmethod
     def compute_statistics(series: pd.Series, window: int = 22):
         """Compute comprehensive statistics on a price series."""
-        ret = returns(series, 1)
-        z = zscores(series, Window(window, 0))
+        with _span("econometrics.returns", _ECON_FILE, "returns", 55):
+            ret = returns(series, 1)
+
+        with _span("statistics.zscores", _STATS_FILE, "zscores", 280):
+            z = zscores(series, Window(window, 0))
+
+        with _span("statistics.mean", _STATS_FILE, "mean", 38):
+            m = mean(series)
+
+        with _span("statistics.median", _STATS_FILE, "median", 66):
+            med = median(series)
+
+        with _span("statistics.std", _STATS_FILE, "std", 92):
+            s = std(ret, Window(window, 0))
+
+        with _span("statistics.range_", _STATS_FILE, "range_", 175):
+            r = range_(series, Window(window, 0))
+
+        with _span("analysis.last_value", _ANALYSIS_FILE, "last_value", 196):
+            lv = last_value(series)
+
+        with _span("analysis.first", _ANALYSIS_FILE, "first", 172):
+            fv = first(series)
+
+        with _span("analysis.count", _ANALYSIS_FILE, "count", 219):
+            ct = count(series)
 
         return {
-            "mean": float(mean(series).iloc[-1]),
-            "median": float(median(series).iloc[-1]),
-            "std": float(std(ret, Window(window, 0)).iloc[-1] * 100),
-            "range": float(range_(series, Window(window, 0)).iloc[-1]),
-            "last_value": float(last_value(series)),
-            "first_value": float(first(series).iloc[0]),
-            "count": int(count(series).iloc[-1]),
+            "mean": float(m.iloc[-1]),
+            "median": float(med.iloc[-1]),
+            "std": float(s.iloc[-1] * 100),
+            "range": float(r.iloc[-1]),
+            "last_value": float(lv),
+            "first_value": float(fv.iloc[0]),
+            "count": int(ct.iloc[-1]),
             "z_score": float(z.iloc[-1]) if len(z) > 0 else None,
         }
 
     @staticmethod
     def compute_volatility(series: pd.Series, window: int = 22):
         """Annualized volatility computation."""
-        ret = returns(series, 1)
-        rolling_vol = std(ret, Window(window, 0))
+        with _span("econometrics.returns", _ECON_FILE, "returns", 55):
+            ret = returns(series, 1)
+
+        with _span("statistics.std", _STATS_FILE, "std", 92):
+            rolling_vol = std(ret, Window(window, 0))
 
         # Annualize (252 trading days)
         ann_vol = rolling_vol * np.sqrt(252)
@@ -187,9 +251,12 @@ class PortfolioOptimizer:
         all_returns = {}
 
         for ticker, series in portfolio.items():
-            ret = returns(series, 1)
+            with _span("econometrics.returns", _ECON_FILE, "returns", 55):
+                ret = returns(series, 1)
             all_returns[ticker] = ret
-            vol = std(ret, Window(window, 0))
+
+            with _span("statistics.std", _STATS_FILE, "std", 92):
+                vol = std(ret, Window(window, 0))
 
             results[ticker] = {
                 "total_return_pct": float(
@@ -206,10 +273,11 @@ class PortfolioOptimizer:
         for i, t1 in enumerate(tickers):
             for t2 in tickers[i + 1:]:
                 try:
-                    corr = correlation(
-                        all_returns[t1], all_returns[t2],
-                        Window(window, 0)
-                    )
+                    with _span("econometrics.correlation", _ECON_FILE, "correlation", 310):
+                        corr = correlation(
+                            all_returns[t1], all_returns[t2],
+                            Window(window, 0)
+                        )
                     corr_matrix[f"{t1}/{t2}"] = float(corr.iloc[-1]) \
                         if len(corr) > 0 else None
                 except Exception:
@@ -262,28 +330,32 @@ async def health():
 @app.post("/api/v1/analytics/returns")
 async def compute_returns(req: TickerRequest):
     """Compute returns analysis for a given ticker."""
-    series = DataLoader.generate_price_series(req.ticker, req.days)
-    result = AnalyticsEngine.compute_returns_analysis(series, req.window)
+    with _span("AnalyticsEngine.compute_returns_analysis", __file__, "compute_returns_analysis"):
+        series = DataLoader.generate_price_series(req.ticker, req.days)
+        result = AnalyticsEngine.compute_returns_analysis(series, req.window)
     return {"ticker": req.ticker, "analysis": result}
 
 
 @app.post("/api/v1/analytics/statistics")
-async def compute_statistics(req: TickerRequest):
+async def compute_statistics_endpoint(req: TickerRequest):
     """Compute comprehensive statistics for a given ticker."""
-    series = DataLoader.generate_price_series(req.ticker, req.days)
-    result = AnalyticsEngine.compute_statistics(series, req.window)
+    with _span("AnalyticsEngine.compute_statistics", __file__, "compute_statistics"):
+        series = DataLoader.generate_price_series(req.ticker, req.days)
+        result = AnalyticsEngine.compute_statistics(series, req.window)
     return {"ticker": req.ticker, "statistics": result}
 
 
 @app.post("/api/v1/analytics/sharpe")
 async def compute_sharpe(req: TickerRequest):
     """Compute Sharpe ratio for a given ticker."""
-    series = DataLoader.generate_price_series(req.ticker, req.days)
-    ret = returns(series, 1)
-    # Manual Sharpe: mean(returns) / std(returns) * sqrt(252)
-    daily_mean = float(ret.mean())
-    daily_std = float(ret.std())
-    annual_sharpe = (daily_mean / daily_std) * np.sqrt(252) if daily_std > 0 else 0
+    with _span("AnalyticsEngine.compute_sharpe", __file__, "compute_sharpe"):
+        series = DataLoader.generate_price_series(req.ticker, req.days)
+        with _span("econometrics.returns", _ECON_FILE, "returns", 55):
+            ret = returns(series, 1)
+        # Manual Sharpe: mean(returns) / std(returns) * sqrt(252)
+        daily_mean = float(ret.mean())
+        daily_std = float(ret.std())
+        annual_sharpe = (daily_mean / daily_std) * np.sqrt(252) if daily_std > 0 else 0
     return {
         "ticker": req.ticker,
         "sharpe_ratio": round(annual_sharpe, 4),
@@ -293,29 +365,34 @@ async def compute_sharpe(req: TickerRequest):
 
 
 @app.post("/api/v1/analytics/volatility")
-async def compute_volatility(req: TickerRequest):
+async def compute_volatility_endpoint(req: TickerRequest):
     """Compute volatility analysis for a given ticker."""
-    series = DataLoader.generate_price_series(req.ticker, req.days)
-    result = AnalyticsEngine.compute_volatility(series, req.window)
+    with _span("AnalyticsEngine.compute_volatility", __file__, "compute_volatility"):
+        series = DataLoader.generate_price_series(req.ticker, req.days)
+        result = AnalyticsEngine.compute_volatility(series, req.window)
     return {"ticker": req.ticker, "volatility": result}
 
 
 @app.post("/api/v1/analytics/portfolio")
 async def analyze_portfolio(req: PortfolioRequest):
     """Run full portfolio analysis across multiple tickers."""
-    portfolio = DataLoader.load_portfolio(req.tickers, req.days)
-    result = PortfolioOptimizer.analyze_portfolio(portfolio, req.window)
+    with _span("PortfolioOptimizer.analyze_portfolio", __file__, "analyze_portfolio"):
+        portfolio = DataLoader.load_portfolio(req.tickers, req.days)
+        result = PortfolioOptimizer.analyze_portfolio(portfolio, req.window)
     return {"portfolio": result}
 
 
 @app.post("/api/v1/analytics/correlation")
 async def compute_correlation(req: CorrelationRequest):
     """Compute rolling correlation between two tickers."""
-    s1 = DataLoader.generate_price_series(req.ticker1, req.days)
-    s2 = DataLoader.generate_price_series(req.ticker2, req.days)
-    r1 = returns(s1, 1)
-    r2 = returns(s2, 1)
-    corr = correlation(r1, r2, Window(req.window, 0))
+    with _span("AnalyticsEngine.compute_correlation", __file__, "compute_correlation"):
+        s1 = DataLoader.generate_price_series(req.ticker1, req.days)
+        s2 = DataLoader.generate_price_series(req.ticker2, req.days)
+        with _span("econometrics.returns", _ECON_FILE, "returns", 55):
+            r1 = returns(s1, 1)
+            r2 = returns(s2, 1)
+        with _span("econometrics.correlation", _ECON_FILE, "correlation", 310):
+            corr = correlation(r1, r2, Window(req.window, 0))
     return {
         "pair": f"{req.ticker1}/{req.ticker2}",
         "current_correlation": float(corr.iloc[-1]) if len(corr) > 0 else None,
@@ -337,7 +414,6 @@ if __name__ == "__main__":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
-        from opentelemetry import trace
 
         provider = TracerProvider()
         exporter = OTLPSpanExporter(
@@ -350,7 +426,7 @@ if __name__ == "__main__":
     except ImportError:
         print("⚠️  OTel not installed — traces won't be exported")
 
-    print("🚀 Starting gs-quant Analytics API on http://0.0.0.0:8000")
+    print("🚀 Starting gs-quant Analytics API on http://0.0.0.0:8001")
     print("   Endpoints:")
     print("   POST /api/v1/analytics/returns")
     print("   POST /api/v1/analytics/statistics")

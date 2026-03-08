@@ -455,6 +455,16 @@ def _correlate_spans_to_code(spans, trace_events):
         if name and name not in seen:
             seen.add(name)
 
+            # 0. Try code.function attribute (set by manual OTel spans)
+            #    This is the most reliable — the span author explicitly
+            #    tells us which function it wraps.
+            code_func = attrs.get("code.function", "")
+            if code_func:
+                unit = _indexer.search_by_function_name(code_func)
+                if unit:
+                    _add_to_map(name, unit, "code_attr")
+                    continue
+
             # 1. Try route matching on span name (e.g., "GET /places" → getPlaces)
             unit = _indexer.search_by_route(name)
             if unit:
