@@ -92,7 +92,7 @@ def _parse_protobuf_traces(data):
         from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
             ExportTraceServiceRequest,
         )
-        import base64
+        import base64, binascii
 
         request = ExportTraceServiceRequest()
         request.ParseFromString(data)
@@ -108,8 +108,8 @@ def _parse_protobuf_traces(data):
                         if val:
                             try:
                                 span[field] = base64.b64decode(val).hex()
-                            except Exception:
-                                pass  # Already hex or invalid
+                            except (binascii.Error, ValueError):
+                                pass  # Already hex string
         return result
     except ImportError:
         log.warning("protobuf deps not installed — install opentelemetry-proto")
@@ -348,7 +348,7 @@ class OTLPHandler(BaseHTTPRequestHandler):
                         # Retrieve context for error spans
                         rag_sections = []
                         for node in graph.nodes.values():
-                            if getattr(node, 'error', None):
+                            if node.error:
                                 ctx = rag.retrieve_for_error(node, graph)
                                 if ctx.causal_chain:
                                     chain_str = " → ".join(

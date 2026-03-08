@@ -17,6 +17,7 @@ Supports two search backends (auto-selected):
 """
 
 import ast
+import logging
 import os
 import re
 import math
@@ -25,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+log = logging.getLogger(__name__)
 
 @dataclass
 class CodeUnit:
@@ -591,8 +593,9 @@ class CodeIndexer:
             self._vector_store.add(vectors, list(range(len(self._units))))
             self._embeddings_built = True
 
-        except Exception:
-            # Embedding failed — no problem, TF-IDF still works
+        except (RuntimeError, ValueError, ImportError) as e:
+            # Embedding build can fail (bad SVD, missing deps) — TF-IDF still works
+            log.debug("Embedding build skipped: %s", e)
             self._embeddings_built = False
 
     def search(self, query: str, top_k: int = 5) -> List[SearchResult]:

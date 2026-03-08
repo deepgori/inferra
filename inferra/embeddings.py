@@ -340,12 +340,8 @@ def get_best_backend() -> Optional[EmbeddingBackend]:
     """
     try:
         return SentenceTransformerEmbedding()
-    except (ImportError, Exception):
+    except (ImportError, OSError):
+        # sentence-transformers not installed or model download failed
         pass
 
-    try:
-        return LocalEmbedding(n_components=64)
-    except Exception:
-        pass
-
-    return None
+    return LocalEmbedding(n_components=64)

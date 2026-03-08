@@ -70,7 +70,7 @@ def _call_claude(prompt: str, system: str = "", max_tokens: int = 1500) -> Optio
             method="POST",
         )
 
-        # Try with certifi first, then system certs, then unverified
+        # SSL context: prefer certifi → system certs → unverified (last resort)
         ctx = None
         try:
             import certifi
@@ -78,7 +78,8 @@ def _call_claude(prompt: str, system: str = "", max_tokens: int = 1500) -> Optio
         except ImportError:
             try:
                 ctx = ssl.create_default_context()
-            except Exception:
+            except ssl.SSLError:
+                print("   ⚠️  SSL setup failed, falling back to unverified")
                 ctx = ssl._create_unverified_context()
 
         with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
@@ -90,11 +91,12 @@ def _call_claude(prompt: str, system: str = "", max_tokens: int = 1500) -> Optio
         try:
             err = json.loads(body)
             msg = err.get("error", {}).get("message", body[:200])
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             msg = body[:200]
         print(f"   ⚠️  Claude API error (HTTP {e.code}): {msg}")
         return None
-    except Exception as e:
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        print(f"   ⚠️  Claude API connection error: {e}")
         return None
 
 
@@ -266,7 +268,8 @@ class DeepReasoningAgent(BaseAgent):
                 )
 
             return response
-        except Exception:
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"   ⚠️  Agentic loop failed: {e}")
             return None
 
     def _extract_code_requests(self, response: str) -> List[str]:
@@ -390,15 +393,15 @@ class DeepReasoningAgent(BaseAgent):
 
         # Add span timing summary from the execution graph
         parts.append("\n## Span Timing Summary\n")
-        if hasattr(graph, 'nodes') and graph.nodes:
+        if graph.nodes:
             sorted_nodes = sorted(
                 graph.nodes.values(),
-                key=lambda n: n.duration_ms if hasattr(n, 'duration_ms') else 0,
+                key=lambda n: n.duration_ms or 0,
                 reverse=True,
             )
             for node in sorted_nodes[:10]:
-                dur = getattr(node, 'duration_ms', 0)
-                err = ' [ERROR]' if getattr(node, 'error', None) else ''
+                dur = node.duration_ms or 0
+                err = ' [ERROR]' if node.error else ''
                 parts.append(
                     f"- {node.function_name}: {dur:.1f}ms{err}"
                 )
