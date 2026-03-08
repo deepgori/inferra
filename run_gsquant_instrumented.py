@@ -46,13 +46,13 @@ from pydantic import BaseModel
 
 # Import gs-quant timeseries functions
 from gs_quant.timeseries.statistics import (
-    mean, median, mode, std, var, sum_,
+    mean, median, std, sum_,
     min_, max_, range_, percentile,
-    correlation, zscores,
+    zscores,
 )
 from gs_quant.timeseries.econometrics import (
     returns, prices, index, change, volatility,
-    sharpe_ratio, excess_returns_,
+    correlation,
 )
 from gs_quant.timeseries.analysis import (
     diff, lag, first, last, last_value, count,
@@ -88,8 +88,9 @@ class DataLoader:
         dates = pd.bdate_range(
             end=datetime.now(), periods=days, freq="B"
         )
+        n = len(dates)
         daily_returns = np.random.normal(
-            params["mu"], params["sigma"], days
+            params["mu"], params["sigma"], n
         )
         price_path = params["base"] * np.exp(np.cumsum(daily_returns))
         return pd.Series(price_path, index=dates, name=ticker)
@@ -357,4 +358,4 @@ if __name__ == "__main__":
     print("   POST /api/v1/analytics/volatility")
     print("   POST /api/v1/analytics/portfolio")
     print("   POST /api/v1/analytics/correlation")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="warning")

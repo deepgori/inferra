@@ -609,11 +609,11 @@ class DeepReasoningAgent(BaseAgent):
         if graph.nodes:
             sorted_nodes = sorted(
                 graph.nodes.values(),
-                key=lambda n: n.duration_ms or 0,
+                key=lambda n: (n.duration or 0) * 1000,
                 reverse=True,
             )
             for node in sorted_nodes[:10]:
-                dur = node.duration_ms or 0
+                dur = (node.duration or 0) * 1000
                 err = ' [ERROR]' if node.error else ''
                 parts.append(
                     f"- {node.function_name}: {dur:.1f}ms{err}"
