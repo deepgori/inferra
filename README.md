@@ -1,4 +1,4 @@
-# Inferra — Autonomous Debugging via Trace-to-Code Correlation
+# Inferra - Autonomous Debugging via Trace-to-Code Correlation
 
 [![Tests](https://github.com/deepgori/inferra/actions/workflows/tests.yml/badge.svg)](https://github.com/deepgori/inferra/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/inferra)](https://pypi.org/project/inferra/)
@@ -7,7 +7,7 @@
 
 **Turn production traces into code-level diagnoses. Automatically.**
 
-Inferra bridges the gap between observability tools (which show _what_ happened) and source code (which shows _why_ it happened). It ingests standard [OpenTelemetry](https://opentelemetry.io/) traces, maps each span to the exact function and line in your codebase via AST analysis, and produces a structured root cause analysis — powered by your choice of LLM.
+Inferra bridges the gap between observability tools (which show _what_ happened) and source code (which shows _why_ it happened). It ingests standard [OpenTelemetry](https://opentelemetry.io/) traces, maps each span to the exact function and line in your codebase via AST analysis, and produces a structured root cause analysis - powered by your choice of LLM.
 
 ```
 Your App → OTLP Traces → Inferra → Code-Aware Diagnosis  (routes.py:195, cve_extractor.py:43)
@@ -21,7 +21,7 @@ Your App → OTLP Traces → Inferra → Code-Aware Diagnosis  (routes.py:195, c
 pip install inferra
 ```
 
-### Option A: OTLP Mode (Production Debugging — Recommended)
+### Option A: OTLP Mode (Production Debugging - Recommended)
 
 Point Inferra at your codebase, send it traces from your running app:
 
@@ -68,11 +68,11 @@ But they don't tell you _which function_ handles that endpoint, _what_ the code 
 > "The endpoint is slow. Consider optimizing."
 
 ### With Inferra
-> "`POST /api/analyze` at `routes.py:195` calls `graph.invoke()` which runs 3 agents sequentially — `cve_extractor.py:43` (1.2s), `attack_classifier.py:110` (1.1s), `playbook_generator.py:39` (1.2s). Use `asyncio.gather()` to parallelize for ~3x speedup."
+> "`POST /api/analyze` at `routes.py:195` calls `graph.invoke()` which runs 3 agents sequentially - `cve_extractor.py:43` (1.2s), `attack_classifier.py:110` (1.1s), `playbook_generator.py:39` (1.2s). Use `asyncio.gather()` to parallelize for ~3x speedup."
 
 ## Multi-LLM Support
 
-Inferra supports 3 backends — swap with one environment variable:
+Inferra supports 3 backends - swap with one environment variable:
 
 | Backend | Models | Speed | Quality | Cost |
 |---------|--------|-------|---------|------|
@@ -89,7 +89,7 @@ inferra serve --project ./my-app --llm groq --model moonshotai/kimi-k2-instruct
 export ANTHROPIC_API_KEY=your-key
 inferra serve --project ./my-app --llm claude
 
-# Ollama (free, runs locally — no API key needed)
+# Ollama (free, runs locally - no API key needed)
 ollama pull qwen3:8b
 inferra serve --project ./my-app --llm ollama
 ```
@@ -177,7 +177,7 @@ inferra serve --help
 | `INFERRA_LLM_MODEL` | Optional | Specific model name |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | For your app | Set to `http://localhost:4318` |
 
-## Code Indexer — The Core
+## Code Indexer - The Core
 
 The code indexer is the critical component that makes Inferra more than a trace viewer. For every function it finds, it extracts:
 
@@ -190,11 +190,11 @@ The code indexer is the critical component that makes Inferra more than a trace 
 | `calls` | `["articles.get_by_slug"]` | Dependency chain |
 | `log_patterns` | `["error fetching article"]` | Match against log messages |
 
-## Analysis Pipeline — Heuristics + LLM
+## Analysis Pipeline - Heuristics + LLM
 
-1. **Rule-based analyzers** run first — `LogAnalysisAgent` classifies errors, `MetricsCorrelationAgent` finds slow spans and computes the critical path, `PatternAnalysisAgent` identifies antipatterns (N+1 queries, missing error handlers)
+1. **Rule-based analyzers** run first - `LogAnalysisAgent` classifies errors, `MetricsCorrelationAgent` finds slow spans and computes the critical path, `PatternAnalysisAgent` identifies antipatterns (N+1 queries, missing error handlers)
 2. **Findings are structured** into typed objects with severity, confidence scores, and evidence chains
-3. **LLM synthesis** with agentic code retrieval — the LLM receives structured findings and correlated source code, then can request additional code via `[NEED_CODE: function_name]` markers
+3. **LLM synthesis** with agentic code retrieval - the LLM receives structured findings and correlated source code, then can request additional code via `[NEED_CODE: function_name]` markers
 
 ## Project Structure
 
@@ -228,10 +228,10 @@ The key difference: Inferra uses **standard OTLP** (no vendor SDK), correlates v
 
 ## Limitations
 
-- **Python only** — The AST indexer currently supports Python. The architecture is language-agnostic (OTLP + pluggable indexers), but only one indexer is implemented.
-- **Not real-time monitoring** — Analysis is triggered manually, not streaming 24/7.
-- **Manual instrumented runners** — For the OTLP mode, projects without OTel instrumentation need a custom runner. Auto-instrumentation is on the roadmap.
-- **No persistence** — Restarting clears the span buffer. No database backing.
+- **Python only** - The AST indexer currently supports Python. The architecture is language-agnostic (OTLP + pluggable indexers), but only one indexer is implemented.
+- **Not real-time monitoring** - Analysis is triggered manually, not streaming 24/7.
+- **Manual instrumented runners** - For the OTLP mode, projects without OTel instrumentation need a custom runner. Auto-instrumentation is on the roadmap.
+- **No persistence** - Restarting clears the span buffer. No database backing.
 
 ## License
 
