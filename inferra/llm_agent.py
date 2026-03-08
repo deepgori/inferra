@@ -400,7 +400,7 @@ class DeepReasoningAgent(BaseAgent):
                 dur = getattr(node, 'duration_ms', 0)
                 err = ' [ERROR]' if getattr(node, 'error', None) else ''
                 parts.append(
-                    f"- {node.name}: {dur:.1f}ms{err}"
+                    f"- {node.function_name}: {dur:.1f}ms{err}"
                 )
 
         # Inject correlated source code

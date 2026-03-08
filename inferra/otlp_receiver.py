@@ -352,10 +352,10 @@ class OTLPHandler(BaseHTTPRequestHandler):
                                 ctx = rag.retrieve_for_error(node, graph)
                                 if ctx.causal_chain:
                                     chain_str = " → ".join(
-                                        n.name for n in ctx.causal_chain[:5]
+                                        n.function_name for n in ctx.causal_chain[:5]
                                     )
                                     rag_sections.append(
-                                        f"Causal chain for {node.name}: "
+                                        f"Causal chain for {node.function_name}: "
                                         f"{chain_str}"
                                     )
 
