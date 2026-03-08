@@ -1,296 +1,202 @@
+#!/usr/bin/env python3
 """
-demo.py — Full Working Demonstration of async_content_tracer
+demo.py — One-command Inferra demo
 
-Simulates a realistic async request pipeline that hits all the key scenarios:
+Usage:
+    python3 demo.py                                    # uses cybersec project (default)
+    python3 demo.py ./test_projects/gs-quant/gs_quant  # any project path
+    python3 demo.py <github-url>                       # clone + analyze
 
-1. An incoming request fans out to multiple async tasks (branching)
-2. Some work gets offloaded to a thread pool (cross-thread propagation)
-3. One path deliberately loses context (showing the problem)
-4. Another path uses TracedThreadPoolExecutor (showing the fix)
-5. An error occurs in one branch (error tracking)
-
-The demo produces:
-- Console output showing the traced execution
-- An execution graph summary with context gap detection
-- A JSON export of the full DAG
-- A DOT file for Graphviz visualization
+Starts OTLP receiver, instrumented app, sends traffic, triggers analysis,
+and opens the HTML report — all in one shot.
 """
 
-import asyncio
+import os
+import sys
 import time
-import random
-from concurrent.futures import ThreadPoolExecutor
+import json
+import signal
+import subprocess
+import urllib.request
+import urllib.error
 
-from async_content_tracer.context import ContextManager, TracedThreadPoolExecutor
-from async_content_tracer.tracer import Tracer
-from async_content_tracer.graph import ExecutionGraph
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+LLM_MODEL = os.environ.get("INFERRA_LLM_MODEL", "moonshotai/kimi-k2-instruct")
 
+# ── Resolve target project ──────────────────────────────────────────
+target = sys.argv[1] if len(sys.argv) > 1 else "./test_projects/agentic_cybersec_threat_analyst/backend"
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
+if target.startswith("http"):
+    # Clone from GitHub
+    repo_name = target.rstrip("/").split("/")[-1].replace(".git", "")
+    dest = os.path.join(PROJECT_DIR, "test_projects", repo_name)
+    if not os.path.exists(dest):
+        print(f"\n📥 Cloning {target} ...")
+        subprocess.run(["git", "clone", "--depth=1", target, dest], check=True)
+    # Auto-detect Python source dir
+    for candidate in ["src", "app", repo_name, repo_name.replace("-", "_"), "."]:
+        if os.path.isdir(os.path.join(dest, candidate)):
+            target = os.path.join(dest, candidate)
+            break
+    else:
+        target = dest
+    print(f"   → Using: {target}")
 
-ctx = ContextManager()
-tracer = Tracer(context_manager=ctx)
+# ── Pick runner if available ─────────────────────────────────────────
+RUNNERS = {
+    "agentic_cybersec_threat_analyst": ("run_cybersec_instrumented.py", 8002),
+    "gs-quant": ("run_gsquant_instrumented.py", 8001),
+}
 
+runner_file = None
+api_port = None
+for key, (rf, port) in RUNNERS.items():
+    if key in target:
+        runner_path = os.path.join(PROJECT_DIR, rf)
+        if os.path.exists(runner_path):
+            runner_file = runner_path
+            api_port = port
+        break
 
-# ── Simulated Service Functions ───────────────────────────────────────────────
-# These simulate a microservice-style request pipeline:
-# handle_request -> [validate, fetch_user, process_data] -> aggregate -> respond
+processes = []
 
+def cleanup(*_):
+    print("\n🧹 Cleaning up...")
+    for p in processes:
+        try: p.terminate()
+        except: pass
+    sys.exit(0)
 
-@tracer.trace
-async def handle_request(request_id: str) -> dict:
-    """Entry point — simulates an incoming HTTP request handler."""
-    print(f"\n📥 Incoming request: {request_id}")
+signal.signal(signal.SIGINT, cleanup)
+signal.signal(signal.SIGTERM, cleanup)
 
-    # Fan out to multiple async tasks (this is where context forks)
-    validation_task = asyncio.create_task(validate_request(request_id))
-    user_task = asyncio.create_task(fetch_user_data(request_id))
+try:
+    # ── Step 1: Kill existing processes on ports ─────────────────────
+    print("\n" + "═" * 60)
+    print("  🔬 Inferra Demo — One-Command Pipeline")
+    print("═" * 60)
 
-    is_valid = await validation_task
-    user_data = await user_task
+    for port in [4318, api_port or 0]:
+        if port:
+            os.system(f"lsof -ti :{port} | xargs kill -9 2>/dev/null")
+    time.sleep(1)
 
-    if not is_valid:
-        raise ValueError(f"Request {request_id} failed validation")
-
-    # Process data — this offloads to thread pool
-    processed = await process_data(user_data)
-
-    # Aggregate results
-    result = await aggregate_results(request_id, user_data, processed)
-
-    print(f"✅ Request {request_id} complete")
-    return result
-
-
-@tracer.trace
-async def validate_request(request_id: str) -> bool:
-    """Validates the incoming request (simulated)."""
-    await asyncio.sleep(0.05)  # Simulate I/O
-    print(f"  ✓ Validated request {request_id}")
-    return True
-
-
-@tracer.trace
-async def fetch_user_data(request_id: str) -> dict:
-    """Fetches user data from a database (simulated)."""
-    await asyncio.sleep(0.08)  # Simulate DB query
-
-    # Sub-query: fetch permissions
-    permissions = await fetch_permissions(request_id)
-
-    user = {"id": request_id, "name": "demo_user", "permissions": permissions}
-    print(f"  ✓ Fetched user data for {request_id}")
-    return user
-
-
-@tracer.trace
-async def fetch_permissions(request_id: str) -> list:
-    """Nested async call — fetches user permissions."""
-    await asyncio.sleep(0.03)
-    return ["read", "write", "admin"]
-
-
-@tracer.trace
-async def process_data(user_data: dict) -> dict:
-    """
-    Offloads CPU-intensive work to a thread pool.
-    This is where context bleed can happen with a standard ThreadPoolExecutor.
-    """
-    loop = asyncio.get_running_loop()
-
-    # ── DEMO: Show the problem and the fix side by side ──
-
-    # 1. Using TracedThreadPoolExecutor (THE FIX) — context propagates correctly
-    print("\n  🔧 Thread pool submission (with context propagation)...")
-    with TracedThreadPoolExecutor(max_workers=2) as pool:
-        future_good = loop.run_in_executor(
-            pool, cpu_intensive_work, user_data, "with_context"
-        )
-        result_good = await future_good
-
-    # 2. Using standard ThreadPoolExecutor (THE PROBLEM) — context may bleed
-    print("  ⚠️  Thread pool submission (standard — context may bleed)...")
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        future_bad = loop.run_in_executor(
-            pool, cpu_intensive_work, user_data, "without_context"
-        )
-        result_bad = await future_bad
-
-    return {"processed_with_ctx": result_good, "processed_without_ctx": result_bad}
-
-
-@tracer.trace
-def cpu_intensive_work(data: dict, label: str) -> dict:
-    """
-    Simulates CPU-bound work running on a thread pool worker.
-    This function checks whether context was properly propagated.
-    """
-    import threading
-
-    current_ctx = ctx.current()
-    has_context = current_ctx is not None and current_ctx.context_id is not None
-
-    thread_name = threading.current_thread().name
-    status = "✅ HAS CONTEXT" if has_context else "❌ CONTEXT LOST"
-    print(f"    [{label}] Running on {thread_name}: {status}")
-
-    # Simulate CPU work
-    time.sleep(0.05)
-
-    return {
-        "label": label,
-        "thread": thread_name,
-        "context_preserved": has_context,
-        "result": sum(range(10000)),
+    env = {
+        **os.environ,
+        "GROQ_API_KEY": GROQ_KEY,
+        "INFERRA_LLM_BACKEND": "groq",
+        "INFERRA_LLM_MODEL": LLM_MODEL,
     }
 
-
-@tracer.trace
-async def aggregate_results(
-    request_id: str, user_data: dict, processed: dict
-) -> dict:
-    """Aggregates results from all sub-tasks."""
-    await asyncio.sleep(0.02)
-    return {
-        "request_id": request_id,
-        "user": user_data["name"],
-        "processing_complete": True,
-        "context_comparison": {
-            "with_propagation": processed["processed_with_ctx"]["context_preserved"],
-            "without_propagation": processed["processed_without_ctx"][
-                "context_preserved"
-            ],
-        },
-    }
-
-
-# ── Scenario 2: Error Propagation ─────────────────────────────────────────────
-
-
-@tracer.trace
-async def handle_failing_request(request_id: str) -> dict:
-    """Simulates a request that fails partway through — shows error tracing."""
-    print(f"\n📥 Incoming request (will fail): {request_id}")
-    await asyncio.sleep(0.02)
-
-    # This will raise — we want to see it in the trace
-    result = await flaky_service_call(request_id)
-    return result
-
-
-@tracer.trace
-async def flaky_service_call(request_id: str) -> dict:
-    """A service that intermittently fails."""
-    await asyncio.sleep(0.03)
-    raise ConnectionError(
-        f"Service unavailable for request {request_id} — "
-        "upstream timeout after 3000ms"
+    # ── Step 2: Start OTLP receiver ─────────────────────────────────
+    print(f"\n📡 Starting OTLP receiver (indexing {os.path.basename(target)})...")
+    otlp = subprocess.Popen(
+        [sys.executable, "-m", "inferra", "serve", "--project", target, "--port", "4318"],
+        cwd=PROJECT_DIR, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
+    processes.append(otlp)
 
+    # Wait for OTLP to be ready
+    for _ in range(60):
+        try:
+            urllib.request.urlopen("http://localhost:4318/healthz", timeout=2)
+            break
+        except:
+            time.sleep(1)
+    else:
+        print("   ❌ OTLP receiver failed to start")
+        cleanup()
 
-# ── Main Demo Runner ──────────────────────────────────────────────────────────
+    print("   ✅ OTLP receiver ready")
 
+    # ── Step 3: Start instrumented app (if runner exists) ────────────
+    if runner_file:
+        print(f"\n🚀 Starting instrumented app on port {api_port}...")
+        app = subprocess.Popen(
+            [sys.executable, runner_file],
+            cwd=PROJECT_DIR, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        processes.append(app)
+        time.sleep(3)
+        print(f"   ✅ App running on http://localhost:{api_port}")
 
-async def main():
-    print("=" * 70)
-    print("  async_content_tracer — DEMO")
-    print("  Async Context Propagation & Execution Graph Reconstruction")
-    print("=" * 70)
+        # ── Step 4: Send traffic ────────────────────────────────────
+        print("\n📨 Sending traffic...")
+        BASE = f"http://localhost:{api_port}"
+        ok = fail = 0
 
-    # ── Scenario 1: Successful request with context propagation ──
-    print("\n" + "─" * 70)
-    print("  SCENARIO 1: Request with async fan-out + thread pool offload")
-    print("─" * 70)
+        if "cybersec" in target:
+            for cve in ["CVE-2021-44228", "CVE-2023-44487", "CVE-2024-3094", "CVE-2024-21762", "CVE-2023-23397"]:
+                try:
+                    urllib.request.urlopen(urllib.request.Request(
+                        f"{BASE}/api/analyze",
+                        json.dumps({"cve_id": cve}).encode(),
+                        {"Content-Type": "application/json"},
+                    ), timeout=30)
+                    ok += 1
+                except:
+                    fail += 1
+                time.sleep(0.3)
+            for p in ["/api/health", "/api/stats", "/api/feed/recent"]:
+                try: urllib.request.urlopen(f"{BASE}{p}", timeout=10); ok += 1
+                except: fail += 1
 
-    # Start a new request context
-    root_span = ctx.new_context()
-    print(f"  Context ID: {root_span.context_id[:16]}...")
+        elif "gsquant" in target or "gs-quant" in target:
+            for t in ["AAPL", "GOOGL", "MSFT", "NVDA", "GS"]:
+                try:
+                    urllib.request.urlopen(urllib.request.Request(
+                        f"{BASE}/api/v1/analytics/returns",
+                        json.dumps({"ticker": t, "days": 252, "window": 22}).encode(),
+                        {"Content-Type": "application/json"},
+                    ), timeout=15)
+                    ok += 1
+                except:
+                    fail += 1
+                time.sleep(0.2)
 
-    result = await handle_request("req-001")
-    print(f"\n  Result: {result}")
+        time.sleep(3)
+        print(f"   ✅ {ok} ok / {fail} fail")
+    else:
+        print(f"\n⚠️  No instrumented runner for this project — using static analysis only")
 
-    # ── Scenario 2: Failing request ──
-    print("\n" + "─" * 70)
-    print("  SCENARIO 2: Request that fails midway (error tracing)")
-    print("─" * 70)
-
-    root_span_2 = ctx.new_context()
-    print(f"  Context ID: {root_span_2.context_id[:16]}...")
-
+    # ── Step 5: Trigger analysis ─────────────────────────────────────
+    print("\n🧠 Triggering RCA analysis...")
     try:
-        await handle_failing_request("req-002")
-    except ConnectionError as e:
-        print(f"\n  ❌ Caught error: {e}")
+        resp = urllib.request.urlopen(
+            urllib.request.Request("http://localhost:4318/v1/analyze", method="POST"),
+            timeout=180,
+        )
+        result = json.loads(resp.read().decode())
+        print(f"   ✅ Analysis complete!")
+        print(f"   📊 Spans: {result.get('span_count', 'N/A')}")
+        print(f"   🔗 Code correlations: {result.get('code_correlations', 'N/A')}")
+        print(f"   🎯 Confidence: {result.get('confidence', 'N/A')}")
+        print(f"   🔍 Root cause: {result.get('root_cause', 'N/A')[:80]}")
+        report = result.get("report_path", "")
+    except Exception as e:
+        print(f"   ❌ Analysis failed: {e}")
+        report = ""
 
-    # ── Build Execution Graph ──
-    print("\n" + "─" * 70)
-    print("  EXECUTION GRAPH ANALYSIS")
-    print("─" * 70)
+    # ── Step 6: Open report ──────────────────────────────────────────
+    if report and os.path.exists(report):
+        print(f"\n📄 Opening report: {os.path.basename(report)}")
+        subprocess.run(["open", report])
+    else:
+        print("\n   ℹ️  No report generated")
 
-    graph = ExecutionGraph()
-    graph.build_from_events(tracer.events)
+    print("\n" + "═" * 60)
+    print("  ✨ Demo complete! Press Ctrl+C to stop servers.")
+    print("═" * 60 + "\n")
 
-    # Print summary
-    print(f"\n{graph.summary()}")
+    # Keep running until Ctrl+C
+    while True:
+        time.sleep(1)
 
-    # Print tree view
-    print("\n📊 Execution Tree:")
-    print(graph.print_tree())
-
-    # Show cross-thread transitions
-    cross_thread = graph.find_cross_thread_edges()
-    if cross_thread:
-        print("🔀 Cross-Thread Transitions Detected:")
-        for parent, child in cross_thread:
-            print(
-                f"  {parent.function_name} ({parent.thread_name}) "
-                f"→ {child.function_name} ({child.thread_name})"
-            )
-
-    # Show errors
-    errors = graph.find_errors()
-    if errors:
-        print("\n❌ Errors in Execution Graph:")
-        for err_node in errors:
-            chain = graph.get_causal_chain(err_node.span_id)
-            print(f"  Error: {err_node.error}")
-            print(f"  Causal chain ({len(chain)} spans):")
-            for i, span in enumerate(chain):
-                arrow = "  └→ " if i == len(chain) - 1 else "  ├→ "
-                print(f"    {arrow}{span.function_name}")
-
-    # Export
-    json_path = "execution_graph.json"
-    dot_path = "execution_graph.dot"
-    graph.to_json(json_path)
-    graph.to_dot(dot_path)
-    print(f"\n💾 Exported: {json_path}, {dot_path}")
-
-    # ── Context Propagation Comparison ──
-    print("\n" + "─" * 70)
-    print("  CONTEXT PROPAGATION COMPARISON")
-    print("─" * 70)
-    print(
-        """
-    TracedThreadPoolExecutor (our fix):
-      → Snapshots context at submit() time
-      → Restores it on the worker thread
-      → ✅ Context preserved across thread boundary
-
-    Standard ThreadPoolExecutor (the problem):
-      → Thread pool reuses threads
-      → Worker thread may have stale context from previous task
-      → ❌ Context bleed / loss
-
-    This is essentially what OpenTelemetry does with their executor wrapper,
-    but built from scratch to understand the mechanics.
-    """
-    )
-
-    print("=" * 70)
-    print("  Demo complete. Check execution_graph.json and execution_graph.dot")
-    print("=" * 70)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+except KeyboardInterrupt:
+    cleanup()
+except Exception as e:
+    print(f"\n❌ Error: {e}")
+    cleanup()

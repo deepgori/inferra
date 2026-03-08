@@ -10,11 +10,13 @@ Multi-backend LLM integration for deep root cause analysis. The agent:
 
 Supported backends:
 - Claude (Anthropic) — cloud API, highest quality
+- Groq — ultra-fast cloud inference (Llama, GPT-OSS, Kimi-K2)
 - Ollama (local) — run Qwen, Llama, etc. locally on Mac M3/M4
 
 Backend selection (auto-detected or explicit):
-    export INFERRA_LLM_BACKEND=claude   # or 'ollama'
+    export INFERRA_LLM_BACKEND=claude   # or 'groq' or 'ollama'
     export INFERRA_LLM_MODEL=qwen3-coder:8b  # optional model override
+    export GROQ_API_KEY=gsk_...              # required for groq backend
 """
 
 import os
@@ -248,6 +250,117 @@ class OllamaBackend(LLMBackend):
             return None
 
 
+class GroqBackend(LLMBackend):
+    """
+    Groq cloud inference backend — ultra-fast LPU-powered inference.
+
+    Supports multiple models via the OpenAI-compatible API:
+      - llama-3.3-70b-versatile   (Meta Llama 3.3, 70B, general-purpose)
+      - openai/gpt-oss-120b       (OpenAI GPT-OSS, 120B, high quality)
+      - moonshotai/kimi-k2-instruct (Moonshot Kimi K2, 120B, reasoning)
+
+    Setup:
+        export GROQ_API_KEY=gsk_...
+        export INFERRA_LLM_BACKEND=groq
+        export INFERRA_LLM_MODEL=llama-3.3-70b-versatile  # optional
+    """
+
+    DEFAULT_MODEL = "llama-3.3-70b-versatile"
+    AVAILABLE_MODELS = [
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
+        "moonshotai/kimi-k2-instruct",
+    ]
+
+    def __init__(self, model: Optional[str] = None):
+        self._api_key = os.environ.get("GROQ_API_KEY")
+        self._model = model or os.environ.get("INFERRA_LLM_MODEL", self.DEFAULT_MODEL)
+        # Validate model name
+        if self._model not in self.AVAILABLE_MODELS:
+            # Fuzzy match: user might say "llama" or "kimi"
+            for m in self.AVAILABLE_MODELS:
+                if self._model.lower() in m.lower():
+                    self._model = m
+                    break
+
+    @property
+    def available(self) -> bool:
+        return self._api_key is not None
+
+    @property
+    def display_name(self) -> str:
+        # Short display: "Groq (llama-3.3-70b)" or "Groq (kimi-k2)"
+        short = self._model.split("/")[-1]  # strip org prefix
+        if len(short) > 25:
+            short = short[:22] + "..."
+        return f"Groq ({short})"
+
+    def call(self, prompt: str, system: str = "", max_tokens: int = 1500) -> Optional[str]:
+        if not self._api_key:
+            return None
+        try:
+            import ssl
+
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
+
+            data = json.dumps({
+                "model": self._model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.3,  # Low temp for analytical reasoning
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/chat/completions",
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._api_key}",
+                    "User-Agent": "Inferra/0.3.0",
+                },
+                method="POST",
+            )
+
+            # SSL: prefer certifi → system certs → unverified
+            ctx = None
+            try:
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except ImportError:
+                try:
+                    ctx = ssl.create_default_context()
+                except ssl.SSLError:
+                    print("   ⚠️  SSL fallback to unverified")
+                    ctx = ssl._create_unverified_context()
+
+            with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                content = result["choices"][0]["message"]["content"]
+
+                # Strip <think>...</think> blocks if model produces them
+                content = re.sub(
+                    r"<think>.*?</think>", "", content, flags=re.DOTALL
+                ).strip()
+
+                return content if content else None
+
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            try:
+                err = json.loads(body)
+                msg = err.get("error", {}).get("message", body[:200])
+            except (json.JSONDecodeError, ValueError):
+                msg = body[:200]
+            print(f"   ⚠️  Groq API error (HTTP {e.code}): {msg}")
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"   ⚠️  Groq connection error: {e}")
+            return None
+
+
 # ── Backend Factory ──────────────────────────────────────────────────────────
 
 _active_backend: Optional[LLMBackend] = None
@@ -258,9 +371,9 @@ def get_llm_backend(preference: Optional[str] = None) -> Optional[LLMBackend]:
     Get the best available LLM backend.
 
     Priority:
-    1. Explicit preference ("claude", "ollama", "local")
+    1. Explicit preference ("claude", "groq", "ollama", "local")
     2. INFERRA_LLM_BACKEND env var
-    3. Auto-detect: Claude if API key set, else Ollama if running
+    3. Auto-detect: Claude → Groq → Ollama (first available wins)
 
     Returns None if no backend is available.
     """
@@ -279,6 +392,15 @@ def get_llm_backend(preference: Optional[str] = None) -> Optional[LLMBackend]:
         print("   ⚠️  Claude requested but ANTHROPIC_API_KEY not set")
         return None
 
+    if choice in ("groq",):
+        model = os.environ.get("INFERRA_LLM_MODEL")
+        backend = GroqBackend(model=model)
+        if backend.available:
+            _active_backend = backend
+            return backend
+        print("   ⚠️  Groq requested but GROQ_API_KEY not set")
+        return None
+
     if choice in ("ollama", "local", "qwen"):
         backend = OllamaBackend()
         if backend.available:
@@ -287,11 +409,17 @@ def get_llm_backend(preference: Optional[str] = None) -> Optional[LLMBackend]:
         print("   ⚠️  Ollama requested but not running. Start with: ollama serve")
         return None
 
-    # Auto-detect: prefer Claude (higher quality), fall back to Ollama
+    # Auto-detect: prefer Claude → Groq → Ollama
     claude = ClaudeBackend()
     if claude.available:
         _active_backend = claude
         return claude
+
+    groq = GroqBackend()
+    if groq.available:
+        print(f"   ℹ️  Using Groq cloud inference: {groq.display_name}")
+        _active_backend = groq
+        return groq
 
     ollama = OllamaBackend()
     if ollama.available:
@@ -688,7 +816,7 @@ class DeepReasoningAgent(BaseAgent):
                 severity=severity,
                 summary=root_cause,
                 details=explanation,
-                evidence=["AI-powered deep analysis via Claude"],
+                evidence=[f"AI-powered deep analysis via {self.backend_name}"],
                 affected_spans=[e.span_id for e in errors],
                 confidence=confidence,
                 recommendations=recommendations or [
@@ -696,6 +824,6 @@ class DeepReasoningAgent(BaseAgent):
                     "Check related code paths for similar issues",
                 ],
                 source_locations=source_locs,
-                metadata={"llm_model": "claude-sonnet-4-20250514", "raw_response": text},
+                metadata={"llm_model": self.backend_name, "raw_response": text},
             )
         ]

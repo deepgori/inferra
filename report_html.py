@@ -257,7 +257,14 @@ def generate_html_report(project_path, stats, trace_data, output_path):
                     llm_html += f'<p style="margin:.3rem 0">{_md_inline(stripped)}</p>\n'
 
             h += '<div class="card" style="border-left:3px solid #6366f1;background:linear-gradient(135deg,#fafbff,#eef2ff)">\n'
-            h += '<h2>🧠 AI Deep Reasoning <span style="font-size:.75rem;font-weight:400;color:var(--muted)">(Claude)</span></h2>\n'
+            # Determine which LLM backend was used
+            _llm_label = "Claude"  # default
+            if report_obj:
+                for f in report_obj.findings:
+                    if f.agent_name == "DeepReasoningAgent" and f.metadata.get("llm_model"):
+                        _llm_label = f.metadata["llm_model"]
+                        break
+            h += f'<h2>🧠 AI Deep Reasoning <span style="font-size:.75rem;font-weight:400;color:var(--muted)">({_esc(_llm_label)})</span></h2>\n'
             h += llm_html
             h += '</div>\n\n'
 

@@ -38,9 +38,12 @@ from inferra.config_indexer import ConfigIndexer, ConfigElement
 from inferra.llm_agent import (
     LLMBackend,
     ClaudeBackend,
+    GroqBackend,
     OllamaBackend,
     get_llm_backend,
 )
+
+from inferra.api import analyze, AnalysisResult
 
 __version__ = "0.3.0"
 __all__ = [
@@ -60,6 +63,7 @@ __all__ = [
     "ConfigElement",
     "LLMBackend",
     "ClaudeBackend",
+    "GroqBackend",
     "OllamaBackend",
     "get_llm_backend",
 ]
