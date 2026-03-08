@@ -35,7 +35,14 @@ from inferra.embeddings import (
 from inferra.sql_indexer import SQLIndexer, SQLModel
 from inferra.config_indexer import ConfigIndexer, ConfigElement
 
-__version__ = "0.2.0"
+from inferra.llm_agent import (
+    LLMBackend,
+    ClaudeBackend,
+    OllamaBackend,
+    get_llm_backend,
+)
+
+__version__ = "0.3.0"
 __all__ = [
     "CodeIndexer",
     "RAGPipeline",
@@ -51,4 +58,8 @@ __all__ = [
     "SQLModel",
     "ConfigIndexer",
     "ConfigElement",
+    "LLMBackend",
+    "ClaudeBackend",
+    "OllamaBackend",
+    "get_llm_backend",
 ]

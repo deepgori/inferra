@@ -1,26 +1,28 @@
 """
 llm_agent.py — LLM-Powered Deep Reasoning Agent
 
-Uses Claude (Anthropic) to perform deep root cause analysis that goes
-beyond heuristic pattern matching. The LLM agent:
+Multi-backend LLM integration for deep root cause analysis. The agent:
 
-1. Receives the execution graph summary and trace events
-2. Can iteratively request additional source code via [NEED_CODE: name]
-2. Receives the rule-based agents' findings
+1. Receives execution graph summaries and trace events
+2. Iteratively requests source code via [NEED_CODE: name] (agentic loop)
 3. Performs deep causal reasoning to explain WHY failures occurred
 4. Generates actionable, context-specific recommendations
-5. Identifies subtle issues that heuristics miss (race conditions,
-   architectural problems, design smells)
 
-Architecture:
-- Plugs into the existing multi-agent coordinator as a specialist
-- Falls back gracefully if no API key is available
-- Uses structured prompts to minimize hallucination
+Supported backends:
+- Claude (Anthropic) — cloud API, highest quality
+- Ollama (local) — run Qwen, Llama, etc. locally on Mac M3/M4
+
+Backend selection (auto-detected or explicit):
+    export INFERRA_LLM_BACKEND=claude   # or 'ollama'
+    export INFERRA_LLM_MODEL=qwen3-coder:8b  # optional model override
 """
 
 import os
 import json
 import re
+import urllib.request
+import urllib.error
+from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -37,67 +39,272 @@ from inferra.agents import (
 )
 
 
-def _get_api_key():
-    """Get Anthropic API key, or None if unavailable."""
-    return os.environ.get("ANTHROPIC_API_KEY")
+# ── LLM Backend Abstraction ──────────────────────────────────────────────────
 
 
-def _call_claude(prompt: str, system: str = "", max_tokens: int = 1500) -> Optional[str]:
-    """Call Claude API directly via urllib to avoid SDK version conflicts."""
-    api_key = _get_api_key()
-    if not api_key:
-        return None
-    try:
-        import urllib.request
-        import urllib.error
-        import ssl
+class LLMBackend(ABC):
+    """Abstract interface for LLM providers."""
 
-        data = json.dumps({
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": max_tokens,
-            "system": system,
-            "messages": [{"role": "user", "content": prompt}],
-        }).encode("utf-8")
+    @abstractmethod
+    def call(self, prompt: str, system: str = "", max_tokens: int = 1500) -> Optional[str]:
+        """Send a prompt to the LLM and return the response text, or None on failure."""
+        ...
 
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            method="POST",
-        )
+    @property
+    @abstractmethod
+    def available(self) -> bool:
+        """Check if this backend is ready to use."""
+        ...
 
-        # SSL context: prefer certifi → system certs → unverified (last resort)
-        ctx = None
+    @property
+    @abstractmethod
+    def display_name(self) -> str:
+        """Human-readable name for reports (e.g., 'Claude', 'Qwen3-Coder')."""
+        ...
+
+
+class ClaudeBackend(LLMBackend):
+    """Anthropic Claude API backend."""
+
+    def __init__(self, model: str = "claude-sonnet-4-20250514"):
+        self._model = model
+        self._api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    @property
+    def available(self) -> bool:
+        return self._api_key is not None
+
+    @property
+    def display_name(self) -> str:
+        return "Claude"
+
+    def call(self, prompt: str, system: str = "", max_tokens: int = 1500) -> Optional[str]:
+        if not self._api_key:
+            return None
         try:
-            import certifi
-            ctx = ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
+            import ssl
+
+            data = json.dumps({
+                "model": self._model,
+                "max_tokens": max_tokens,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}],
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": self._api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                method="POST",
+            )
+
+            # SSL: prefer certifi → system certs → unverified
+            ctx = None
             try:
-                ctx = ssl.create_default_context()
-            except ssl.SSLError:
-                print("   ⚠️  SSL setup failed, falling back to unverified")
-                ctx = ssl._create_unverified_context()
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except ImportError:
+                try:
+                    ctx = ssl.create_default_context()
+                except ssl.SSLError:
+                    print("   ⚠️  SSL fallback to unverified")
+                    ctx = ssl._create_unverified_context()
 
-        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["content"][0]["text"]
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result["content"][0]["text"]
 
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            try:
+                err = json.loads(body)
+                msg = err.get("error", {}).get("message", body[:200])
+            except (json.JSONDecodeError, ValueError):
+                msg = body[:200]
+            print(f"   ⚠️  Claude API error (HTTP {e.code}): {msg}")
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"   ⚠️  Claude connection error: {e}")
+            return None
+
+
+class OllamaBackend(LLMBackend):
+    """
+    Local LLM backend via Ollama (http://localhost:11434).
+
+    Supports any Ollama-compatible model. Recommended for this project:
+      - qwen3-coder:8b   (best for code reasoning, MoE, 256K context)
+      - qwen3.5:14b      (stronger general reasoning, needs 12GB+)
+      - qwen3.5:7b       (good fallback, 8GB RAM)
+
+    Setup:
+      brew install ollama
+      ollama pull qwen3-coder:8b
+    """
+
+    DEFAULT_MODEL = "qwen3-coder:8b"
+    FALLBACK_MODELS = ["qwen3.5:7b", "qwen3:8b", "llama3.1:8b"]
+
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        base_url: str = "http://localhost:11434",
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._model = model or os.environ.get("INFERRA_LLM_MODEL", self.DEFAULT_MODEL)
+        self._available: Optional[bool] = None  # Lazy check
+
+    @property
+    def available(self) -> bool:
+        if self._available is None:
+            self._available = self._check_available()
+        return self._available
+
+    @property
+    def display_name(self) -> str:
+        return f"Ollama ({self._model})"
+
+    def _check_available(self) -> bool:
+        """Check if Ollama is running and the model is available."""
         try:
-            err = json.loads(body)
-            msg = err.get("error", {}).get("message", body[:200])
-        except (json.JSONDecodeError, ValueError):
-            msg = body[:200]
-        print(f"   ⚠️  Claude API error (HTTP {e.code}): {msg}")
+            req = urllib.request.Request(
+                f"{self._base_url}/api/tags",
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                models = [m.get("name", "") for m in data.get("models", [])]
+
+                # Check if requested model is installed
+                if any(self._model in m for m in models):
+                    return True
+
+                # Try fallbacks
+                for fallback in self.FALLBACK_MODELS:
+                    if any(fallback in m for m in models):
+                        print(f"   ℹ️  {self._model} not found, using {fallback}")
+                        self._model = fallback
+                        return True
+
+                if models:
+                    # Use whatever is available
+                    self._model = models[0].split(":")[0] + ":latest"
+                    print(f"   ℹ️  Using available model: {self._model}")
+                    return True
+
+                print(f"   ⚠️  Ollama running but no models installed. Run: ollama pull {self.DEFAULT_MODEL}")
+                return False
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return False
+
+    def call(self, prompt: str, system: str = "", max_tokens: int = 1500) -> Optional[str]:
+        if not self.available:
+            return None
+        try:
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
+
+            data = json.dumps({
+                "model": self._model,
+                "messages": messages,
+                "stream": False,
+                "options": {
+                    "num_predict": max_tokens,
+                    "temperature": 0.3,  # Low temp for analytical reasoning
+                },
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                f"{self._base_url}/api/chat",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            # Ollama can be slow for first call (model loading) — generous timeout
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                content = result.get("message", {}).get("content", "")
+
+                # Strip <think>...</think> blocks from reasoning models
+                content = re.sub(
+                    r"<think>.*?</think>", "", content, flags=re.DOTALL
+                ).strip()
+
+                return content if content else None
+
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            print(f"   ⚠️  Ollama error (HTTP {e.code}): {body[:200]}")
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"   ⚠️  Ollama connection error: {e}")
+            return None
+
+
+# ── Backend Factory ──────────────────────────────────────────────────────────
+
+_active_backend: Optional[LLMBackend] = None
+
+
+def get_llm_backend(preference: Optional[str] = None) -> Optional[LLMBackend]:
+    """
+    Get the best available LLM backend.
+
+    Priority:
+    1. Explicit preference ("claude", "ollama", "local")
+    2. INFERRA_LLM_BACKEND env var
+    3. Auto-detect: Claude if API key set, else Ollama if running
+
+    Returns None if no backend is available.
+    """
+    global _active_backend
+
+    choice = (
+        preference
+        or os.environ.get("INFERRA_LLM_BACKEND", "")
+    ).lower().strip()
+
+    if choice in ("claude", "anthropic"):
+        backend = ClaudeBackend()
+        if backend.available:
+            _active_backend = backend
+            return backend
+        print("   ⚠️  Claude requested but ANTHROPIC_API_KEY not set")
         return None
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        print(f"   ⚠️  Claude API connection error: {e}")
+
+    if choice in ("ollama", "local", "qwen"):
+        backend = OllamaBackend()
+        if backend.available:
+            _active_backend = backend
+            return backend
+        print("   ⚠️  Ollama requested but not running. Start with: ollama serve")
         return None
+
+    # Auto-detect: prefer Claude (higher quality), fall back to Ollama
+    claude = ClaudeBackend()
+    if claude.available:
+        _active_backend = claude
+        return claude
+
+    ollama = OllamaBackend()
+    if ollama.available:
+        print(f"   ℹ️  No API key found, using local LLM: {ollama.display_name}")
+        _active_backend = ollama
+        return ollama
+
+    return None
+
+
+def get_active_backend() -> Optional[LLMBackend]:
+    """Get the currently active backend (set by get_llm_backend)."""
+    return _active_backend
 
 
 SYSTEM_PROMPT = """You are an expert production systems debugger performing root cause analysis.
@@ -146,19 +353,25 @@ class DeepReasoningAgent(BaseAgent):
     """
     LLM-powered specialist agent that performs deep causal reasoning.
 
-    Uses Claude to analyze trace events and code context, producing
-    findings that go beyond pattern matching — explaining WHY failures
-    occurred and identifying subtle architectural issues.
+    Uses Claude or a local LLM (via Ollama) to analyze trace events and
+    code context, producing findings that go beyond pattern matching —
+    explaining WHY failures occurred and identifying architectural issues.
     """
 
-    def __init__(self, indexer: "CodeIndexer" = None):
+    def __init__(self, indexer: "CodeIndexer" = None, backend: Optional[LLMBackend] = None):
         super().__init__("DeepReasoningAgent")
         self._indexer = indexer  # For agentic code retrieval
+        self._backend = backend or get_llm_backend()
 
     @property
     def available(self) -> bool:
-        """Check if LLM is available (API key set)."""
-        return _get_api_key() is not None
+        """Check if an LLM backend is available."""
+        return self._backend is not None and self._backend.available
+
+    @property
+    def backend_name(self) -> str:
+        """Name of the active LLM backend for reports."""
+        return self._backend.display_name if self._backend else "None"
 
     def analyze(
         self,
@@ -175,7 +388,7 @@ class DeepReasoningAgent(BaseAgent):
         prompt = self._build_analysis_prompt(graph, context)
 
         try:
-            analysis_text = _call_claude(prompt, system=SYSTEM_PROMPT, max_tokens=1500)
+            analysis_text = self._backend.call(prompt, system=SYSTEM_PROMPT, max_tokens=1500)
 
             if analysis_text:
                 # Parse the LLM response into structured findings
@@ -187,7 +400,7 @@ class DeepReasoningAgent(BaseAgent):
                         finding_type=FindingType.UNKNOWN,
                         severity=Severity.LOW,
                         summary="LLM analysis: no response received",
-                        details="Claude API returned empty response",
+                        details="LLM returned empty response",
                         evidence=[],
                         affected_spans=[],
                         confidence=0.0,
@@ -240,7 +453,7 @@ class DeepReasoningAgent(BaseAgent):
 
         try:
             for iteration in range(max_iterations + 1):
-                response = _call_claude(
+                response = self._backend.call(
                     prompt, system=SYSTEM_PROMPT, max_tokens=1200
                 )
                 if response is None:

@@ -2,8 +2,8 @@
 inferra — AI-Powered Observability & RCA Engine
 
 Usage:
-    python -m inferra serve [--port 4318]   Start OTLP receiver
-    python -m inferra analyze <path>        Analyze a project
+    python -m inferra serve [--port 4318] [--llm claude|ollama|auto]
+    python -m inferra analyze <path>
 """
 
 import sys
@@ -24,8 +24,21 @@ def main():
         parser.add_argument("--port", type=int, default=4318)
         parser.add_argument("--project", type=str, default=None,
                             help="Path to project codebase for source correlation")
+        parser.add_argument("--llm", type=str, default="auto",
+                            choices=["claude", "ollama", "local", "auto"],
+                            help="LLM backend: claude (cloud), ollama/local (Qwen), auto (detect)")
         # Skip the 'serve' arg
         args = parser.parse_args(sys.argv[2:])
+
+        # Initialize LLM backend
+        llm_choice = None if args.llm == "auto" else args.llm
+        from inferra.llm_agent import get_llm_backend
+        backend = get_llm_backend(llm_choice)
+        if backend:
+            print(f"   🧠 LLM backend: {backend.display_name}")
+        else:
+            print("   ⚠️  No LLM backend available (analysis will use rule-based agents only)")
+
         serve(host=args.host, port=args.port, project=args.project)
 
     elif cmd == "analyze":
