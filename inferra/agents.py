@@ -613,7 +613,7 @@ class CoordinatorAgent(BaseAgent):
             llm_agent = DeepReasoningAgent(indexer=indexer)
             if llm_agent.available:
                 default_specialists.append(llm_agent)
-                import logging; logging.getLogger("inferra").info("DeepReasoningAgent loaded (Claude API)")
+                import logging; logging.getLogger("inferra").info("DeepReasoningAgent loaded (%s)", llm_agent.backend_name)
         except ImportError:
             pass
 
