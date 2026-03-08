@@ -163,13 +163,13 @@ Inferra parses `include_router()` calls across files, builds a prefix chain grap
 
 ## Analysis Pipeline — Heuristics + LLM
 
-Rather than sending raw traces to an LLM and hoping for the best, Inferra uses a two-stage approach:
+Rather than sending raw traces to an LLM and hoping for the best, Inferra uses a three-stage approach:
 
 1. **Rule-based analyzers** run first — a `LogAnalysisAgent` classifies errors and detects cascading failures, a `MetricsCorrelationAgent` finds slow spans and computes the critical path through the execution DAG, and a `PatternAnalysisAgent` identifies common antipatterns (N+1 queries, missing error handlers)
 2. **Findings are structured** into typed objects with severity, confidence scores, evidence chains, and affected span IDs
-3. **LLM synthesis** receives the structured findings AND the correlated source code (full function bodies, not snippets), then produces a coherent diagnosis referencing specific lines
+3. **LLM synthesis** with agentic code retrieval — the LLM receives structured findings and correlated source code, then can request additional code via `[NEED_CODE: function_name]` markers. The system retrieves the code (using TF-IDF + SVD embedding fusion with cosine similarity) and re-prompts, up to 2 iterations
 
-This is not a "multi-agent" system in the LLM-agent sense — the analyzers are deterministic code, not LLM agents. The LLM is called once, at the end, with engineered context. It sees exactly what it needs: the slow span, the heuristic findings about it, and the actual code of the function that handles it.
+The analyzers are deterministic code, not LLM agents. The LLM runs last, with engineered context, and can iteratively pull in more source code as needed to complete its diagnosis.
 
 ## Tested On
 

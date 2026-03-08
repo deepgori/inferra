@@ -5,6 +5,7 @@ Uses Claude (Anthropic) to perform deep root cause analysis that goes
 beyond heuristic pattern matching. The LLM agent:
 
 1. Receives the execution graph summary and trace events
+2. Can iteratively request additional source code via [NEED_CODE: name]
 2. Receives the rule-based agents' findings
 3. Performs deep causal reasoning to explain WHY failures occurred
 4. Generates actionable, context-specific recommendations
@@ -19,7 +20,11 @@ Architecture:
 
 import os
 import json
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from inferra.indexer import CodeIndexer
 
 from async_content_tracer.tracer import TraceEvent, EventType
 from async_content_tracer.graph import ExecutionGraph, SpanNode
@@ -122,6 +127,12 @@ Explicitly reason: "The evidence supports X because..., but Y is also possible i
 State the root cause with a confidence level (HIGH/MEDIUM/LOW) and justification.
 Format: [CONFIDENCE: HIGH|MEDIUM|LOW] Root cause is...
 
+## Tool Use
+If you need to see source code for a function not already provided, respond with:
+    [NEED_CODE: function_or_class_name]
+on its own line. The system will retrieve the code and re-prompt you.
+Only request code that is directly relevant to the diagnosis. Max 2 requests per response.
+
 ## Rules
 - Cite specific function names, file paths, and line numbers
 - Distinguish symptoms (what you observe) from causes (why it happens)
@@ -138,8 +149,9 @@ class DeepReasoningAgent(BaseAgent):
     occurred and identifying subtle architectural issues.
     """
 
-    def __init__(self):
+    def __init__(self, indexer: "CodeIndexer" = None):
         super().__init__("DeepReasoningAgent")
+        self._indexer = indexer  # For agentic code retrieval
 
     @property
     def available(self) -> bool:
@@ -212,17 +224,73 @@ class DeepReasoningAgent(BaseAgent):
         Take the rule-based agents' findings and produce a deep
         reasoning synthesis using the LLM.
 
+        Uses an agentic loop: the LLM can request additional source code
+        via [NEED_CODE: function_name] markers. The system retrieves the
+        code and re-prompts, up to max_iterations times.
+
         Returns a detailed explanation string, or None if unavailable.
         """
         if not self.available or not findings:
             return None
 
+        max_iterations = 2
         prompt = self._build_synthesis_prompt(findings, graph, context, code_context)
 
         try:
-            return _call_claude(prompt, system=SYSTEM_PROMPT, max_tokens=1000)
+            for iteration in range(max_iterations + 1):
+                response = _call_claude(
+                    prompt, system=SYSTEM_PROMPT, max_tokens=1200
+                )
+                if response is None:
+                    return None
+
+                # Check if LLM requested additional code
+                code_requests = self._extract_code_requests(response)
+
+                if not code_requests or not self._indexer or iteration == max_iterations:
+                    # No more requests, or no indexer, or max iterations reached
+                    return response
+
+                # Retrieve requested code and re-prompt
+                retrieved_code = self._retrieve_requested_code(code_requests)
+                if not retrieved_code:
+                    return response  # Nothing found, return as-is
+
+                # Build follow-up prompt with the retrieved code
+                prompt = (
+                    f"You previously requested additional source code. "
+                    f"Here it is:\n\n{retrieved_code}\n\n"
+                    f"Now complete your analysis. Follow the analysis protocol "
+                    f"(TIMELINE → CODE EVIDENCE → HYPOTHESIS → VERDICT).\n\n"
+                    f"Your previous partial response:\n{response}"
+                )
+
+            return response
         except Exception:
             return None
+
+    def _extract_code_requests(self, response: str) -> List[str]:
+        """Parse [NEED_CODE: name] markers from LLM response."""
+        pattern = r'\[NEED_CODE:\s*([^\]]+)\]'
+        matches = re.findall(pattern, response)
+        return [m.strip() for m in matches[:2]]  # Max 2 per response
+
+    def _retrieve_requested_code(self, names: List[str]) -> str:
+        """Retrieve source code for requested function/class names."""
+        if not self._indexer:
+            return ""
+
+        sections = []
+        for name in names:
+            results = self._indexer.search(name, top_k=2)
+            for r in results:
+                unit = r.code_unit
+                sections.append(
+                    f"--- {unit.qualified_name} ({unit.source_file}:{unit.start_line}) ---\n"
+                    f"{unit.body_text}"
+                )
+
+        return "\n\n".join(sections) if sections else ""
 
     def _build_analysis_prompt(
         self,

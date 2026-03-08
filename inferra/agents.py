@@ -597,6 +597,7 @@ class CoordinatorAgent(BaseAgent):
         self,
         specialists: Optional[List[BaseAgent]] = None,
         rag_pipeline: Optional[RAGPipeline] = None,
+        indexer=None,
     ):
         super().__init__("CoordinatorAgent")
 
@@ -609,7 +610,7 @@ class CoordinatorAgent(BaseAgent):
         # Optionally add LLM-powered deep reasoning agent
         try:
             from inferra.llm_agent import DeepReasoningAgent
-            llm_agent = DeepReasoningAgent()
+            llm_agent = DeepReasoningAgent(indexer=indexer)
             if llm_agent.available:
                 default_specialists.append(llm_agent)
                 import logging; logging.getLogger("inferra").info("DeepReasoningAgent loaded (Claude API)")

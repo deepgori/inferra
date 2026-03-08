@@ -63,7 +63,7 @@ class RCAEngine:
         self._indexer = CodeIndexer()
         self._rag: Optional[RAGPipeline] = None
         self._slow_threshold_ms = slow_threshold_ms
-        self._coordinator = CoordinatorAgent()
+        self._coordinator = CoordinatorAgent(indexer=self._indexer)
         self._codebase_indexed = False
 
     def index_codebase(
