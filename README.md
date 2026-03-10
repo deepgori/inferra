@@ -7,7 +7,7 @@
 
 **Turn production traces into code-level diagnoses. Automatically.**
 
-Inferra bridges the gap between observability tools (which show _what_ happened) and source code (which shows _why_ it happened). It ingests standard [OpenTelemetry](https://opentelemetry.io/) traces, maps each span to the exact function and line in your codebase via AST analysis, and produces a structured root cause analysis -- powered by your choice of LLM.
+Inferra bridges the gap between observability tools (which show _what_ happened) and source code (which shows _why_ it happened). It ingests standard [OpenTelemetry](https://opentelemetry.io/) traces, maps each span to the exact function and line in your codebase via AST analysis, and produces a structured root cause analysis, powered by your choice of LLM.
 
 ```
 Your App --> OTLP Traces --> Inferra --> Code-Aware Diagnosis  (routes.py:195, cve_extractor.py:43)
@@ -68,7 +68,7 @@ But they don't tell you _which function_ handles that endpoint, _what_ the code 
 > "The endpoint is slow. Consider optimizing."
 
 ### With Inferra
-> "`POST /api/analyze` at `routes.py:195` calls `graph.invoke()` which runs 3 agents sequentially -- `cve_extractor.py:43` (1.2s), `attack_classifier.py:110` (1.1s), `playbook_generator.py:39` (1.2s). Use `asyncio.gather()` to parallelize for ~3x speedup."
+> "`POST /api/analyze` at `routes.py:195` calls `graph.invoke()` which runs 3 agents sequentially: `cve_extractor.py:43` (1.2s), `attack_classifier.py:110` (1.1s), `playbook_generator.py:39` (1.2s). Use `asyncio.gather()` to parallelize for ~3x speedup."
 
 ## Multi-Language Code Indexing
 
@@ -85,7 +85,7 @@ The Python parser is production-grade (full AST). The JS/TS, Go, and Java parser
 
 ## Multi-LLM Support
 
-Inferra supports 3 backends -- swap with one environment variable:
+Inferra supports 3 backends. Swap with one environment variable:
 
 | Backend | Models | Speed | Quality | Cost |
 |---------|--------|-------|---------|------|
@@ -252,9 +252,9 @@ The key difference: Inferra uses **standard OTLP** (no vendor SDK), correlates v
 
 ## Limitations
 
-- **Regex-based parsers for JS/TS, Go, Java** -- The Python indexer uses full AST parsing. Other languages use regex with generics support, which covers most real-world code but can miss deeply nested constructs.
-- **Not real-time monitoring** -- Analysis is triggered manually via `/v1/analyze`, not streaming 24/7.
-- **LLM-dependent analysis quality** -- The root cause analysis quality scales with the LLM backend. Ollama/Qwen is functional but less accurate than Claude.
+- **Regex-based parsers for JS/TS, Go, Java**: The Python indexer uses full AST parsing. Other languages use regex with generics support, which covers most real-world code but can miss deeply nested constructs. Tree-sitter migration is on the roadmap.
+- **LLM-dependent analysis quality**: Root cause analysis quality scales with the LLM backend. Claude scores 93% accuracy while Ollama/Qwen scores around 70%.
+- **Simulated traces for testing**: The OTLP receiver requires externally instrumented apps or simulated spans. Auto-instrumentation generates scripts but requires manual setup.
 
 ## License
 
