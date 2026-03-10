@@ -51,6 +51,14 @@ interview_prep/
 # Reports (generated output — can regenerate)
 reports/
 
+# Demo & instrumented runner scripts (local testing only)
+demo.py
+demo_app.py
+hit_live_demo.py
+live_demo_app.py
+run_*_instrumented.py
+test_multi_service.py
+
 # API keys / secrets
 .env
 *.key
