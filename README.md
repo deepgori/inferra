@@ -3,7 +3,6 @@
 [![Tests](https://github.com/deepgori/inferra/actions/workflows/tests.yml/badge.svg)](https://github.com/deepgori/inferra/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/inferra)](https://pypi.org/project/inferra/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/inferra/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **Turn production traces into code-level diagnoses. Automatically.**
 
@@ -256,7 +255,3 @@ The key difference: Inferra uses **standard OTLP** (no vendor SDK), correlates v
 - **Not continuous monitoring**: Analysis is triggered manually via `/v1/analyze`. The streaming module provides anomaly detection on ingested spans, but Inferra is not a 24/7 monitoring agent.
 - **LLM-dependent analysis quality**: Root cause analysis quality scales with the LLM backend. Claude scores 93% accuracy while Ollama/Qwen scores around 70%.
 - **Simulated traces for testing**: The OTLP receiver requires externally instrumented apps or simulated spans. Auto-instrumentation generates scripts but requires manual setup.
-
-## License
-
-MIT
