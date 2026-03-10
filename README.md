@@ -253,6 +253,7 @@ The key difference: Inferra uses **standard OTLP** (no vendor SDK), correlates v
 ## Limitations
 
 - **Regex-based parsers for JS/TS, Go, Java**: The Python indexer uses full AST parsing. Other languages use regex with generics support, which covers most real-world code but can miss deeply nested constructs. Tree-sitter migration is on the roadmap.
+- **Not continuous monitoring**: Analysis is triggered manually via `/v1/analyze`. The streaming module provides anomaly detection on ingested spans, but Inferra is not a 24/7 monitoring agent.
 - **LLM-dependent analysis quality**: Root cause analysis quality scales with the LLM backend. Claude scores 93% accuracy while Ollama/Qwen scores around 70%.
 - **Simulated traces for testing**: The OTLP receiver requires externally instrumented apps or simulated spans. Auto-instrumentation generates scripts but requires manual setup.
 
