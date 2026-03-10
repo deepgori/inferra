@@ -58,6 +58,11 @@ hit_live_demo.py
 live_demo_app.py
 run_*_instrumented.py
 test_multi_service.py
+analyze_project.py
+inferra_demo.py
+pharmasight_demo.py
+strie_demo.py
+*_demo.py
 
 # API keys / secrets
 .env
