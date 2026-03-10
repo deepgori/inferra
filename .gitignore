@@ -25,48 +25,39 @@ env/
 .DS_Store
 Thumbs.db
 
-# Project outputs (regenerated on each run)
-execution_graph.json
-execution_graph.dot
-*.db
-
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 
-# Test project codebases (large, third-party — not part of Inferra)
-test_projects/
-
-# Data directory
-data/
-
-# Interview prep (personal)
-interview_prep/
-
-# Log files
-*.log
-
-# Reports (generated output — can regenerate)
-reports/
-
-# Demo & instrumented runner scripts (local testing only)
-demo.py
-demo_app.py
-hit_live_demo.py
-live_demo_app.py
-run_*_instrumented.py
-test_multi_service.py
-analyze_project.py
-inferra_demo.py
-pharmasight_demo.py
-strie_demo.py
-*_demo.py
-
-# API keys / secrets
-.env
-*.key
-stress_test.py
+# Databases
+*.db
 *.db-shm
 *.db-wal
+
+# Logs
+*.log
+
+# Generated outputs
+reports/
+execution_graph.json
+execution_graph.dot
+
+# Secrets
+.env
+*.key
+
+# Local scripts & scratch
+data/
+test_projects/
+run_*.py
+*_demo.py
+*_demo/
+demo*.py
+live_*.py
+stress_test.py
+analyze_project.py
+test_multi_service.py
+scratch/
+interview_prep/
