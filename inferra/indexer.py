@@ -113,7 +113,10 @@ class CodeIndexer:
         exclude_patterns: Optional[List[str]] = None,
     ) -> "CodeIndexer":
         """
-        Index all supported files in a directory (Python, SQL, YAML, .env, TOML).
+        Index all supported files in a directory.
+
+        Supports: Python (AST), JavaScript/TypeScript, Go, Java (regex),
+        SQL (regex), Config files (YAML, .env, TOML).
 
         Args:
             directory: Path to the codebase root
@@ -133,6 +136,49 @@ class CodeIndexer:
 
         # Phase 1.5: Resolve router prefixes from include_router() calls
         self._resolve_router_prefixes(str(root), exclude)
+
+        # Phase 1.6: Index JS/TS, Go, Java files (multi-language parsers)
+        try:
+            from .parsers import get_parser_for_file, SUPPORTED_EXTENSIONS
+            multi_lang_extensions = list(SUPPORTED_EXTENSIONS.keys())
+            multi_lang_counts = {}
+
+            for ext in multi_lang_extensions:
+                pattern = f"*{ext}"
+                for src_file in root.rglob(pattern):
+                    if any(ex in str(src_file) for ex in exclude):
+                        continue
+                    try:
+                        parser = get_parser_for_file(str(src_file))
+                        if not parser:
+                            continue
+                        with open(src_file, "r", encoding="utf-8", errors="ignore") as f:
+                            source = f.read()
+                        rel_path = os.path.relpath(str(src_file), str(root))
+                        module_name = rel_path.replace("/", ".").replace("\\", ".")
+                        # Strip extension from module name
+                        for e in multi_lang_extensions:
+                            if module_name.endswith(e):
+                                module_name = module_name[: -len(e)]
+                                break
+
+                        units = parser.parse(source, str(src_file), module_name)
+                        for unit in units:
+                            self._units.append(unit)
+                            self._file_map[str(src_file)].append(unit)
+                            for pattern_str in unit.log_patterns:
+                                self._log_index[pattern_str.lower()].append(unit)
+
+                        lang = parser.LANGUAGE
+                        multi_lang_counts[lang] = multi_lang_counts.get(lang, 0) + len(units)
+                    except Exception:
+                        continue
+
+            if multi_lang_counts:
+                lang_summary = ", ".join(f"{c} {l}" for l, c in multi_lang_counts.items())
+                log.info(f"  Multi-language: {lang_summary} units")
+        except ImportError:
+            pass
 
         # Phase 2: Index SQL files (regex parsing)
         try:
@@ -159,6 +205,7 @@ class CodeIndexer:
         self._build_tfidf_index()
         self._build_embedding_index()
         return self
+
 
     def _resolve_router_prefixes(self, root: str, exclude: set):
         """

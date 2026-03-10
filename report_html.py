@@ -144,7 +144,7 @@ def generate_html_report(project_path, stats, trace_data, output_path):
         if entry_points:
             success_names = {s[0] for s in successes}
             failure_dict = {f[0]: f[1] for f in failures}
-            h += '<div class="card"><h2>🎯 Discovered Entry Points</h2>\n<table><tr><th>Function</th><th>Status</th></tr>\n'
+            h += '<div class="card"><h2>🎯 Discovered Operations</h2>\n<table><tr><th>Function</th><th>Status</th></tr>\n'
             for ep in entry_points:
                 if ep in success_names:
                     badge = '<span class="badge b-ok">✅ Success</span>'

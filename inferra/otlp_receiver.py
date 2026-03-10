@@ -64,6 +64,8 @@ class SpanBuffer:
 _buffer = SpanBuffer()
 _indexer = None       # CodeIndexer — populated when --project is used
 _project_path = None  # Path to the indexed project
+_storage = None       # Storage — auto-persists analyses
+_last_analysis = None  # Last analysis session for /v1/ask follow-up
 
 
 # ---------------------------------------------------------------------------
@@ -262,14 +264,38 @@ class OTLPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/healthz":
-            self._send(200, {
+            payload = {
                 "status": "ok",
                 "spans_buffered": len(_buffer),
                 "uptime_s": int(time.time() - _start_time),
-            })
+            }
+            if _storage:
+                payload["storage"] = _storage.stats()
+            self._send(200, payload)
         elif self.path == "/v1/traces":
             spans = _buffer.get_all()
             self._send(200, {"spans": spans, "count": len(spans)})
+        elif self.path == "/v1/history":
+            if not _storage:
+                self._send(200, {"history": [], "message": "Storage not enabled"})
+                return
+            # Parse optional ?service=X&limit=N from query string
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            svc = qs.get("service", [None])[0]
+            limit = int(qs.get("limit", [20])[0])
+            history = _storage.get_history(service=svc, limit=limit)
+            self._send(200, {"history": history, "count": len(history)})
+        elif self.path.startswith("/v1/regressions"):
+            if not _storage:
+                self._send(200, {"regressions": [], "message": "Storage not enabled"})
+                return
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            svc = qs.get("service", ["unknown"])[0]
+            days = int(qs.get("days", [7])[0])
+            regressions = _storage.detect_regressions(svc, window_days=days)
+            self._send(200, {"regressions": regressions, "service": svc})
         else:
             self._send(404, {"error": "not found"})
 
@@ -404,6 +430,79 @@ class OTLPHandler(BaseHTTPRequestHandler):
                     result["report_path"] = report_path
                     log.info("HTML report saved: %s", report_path)
 
+                # ── Persist to storage ──
+                if _storage:
+                    try:
+                        # Compute latency stats
+                        durations = [s.get("duration_ms", 0) for s in spans]
+                        durations.sort()
+                        avg_lat = sum(durations) / len(durations) if durations else 0
+                        p95_idx = int(len(durations) * 0.95)
+                        p95_lat = durations[p95_idx] if p95_idx < len(durations) else 0
+                        max_lat = max(durations) if durations else 0
+
+                        # Compute per-span stats
+                        span_groups = {}
+                        for s in spans:
+                            name = s.get("name", "unknown")
+                            dur = s.get("duration_ms", 0)
+                            err = 1 if s.get("error") else 0
+                            if name not in span_groups:
+                                span_groups[name] = {"durs": [], "errs": 0}
+                            span_groups[name]["durs"].append(dur)
+                            span_groups[name]["errs"] += err
+
+                        span_stats_list = []
+                        for name, data in span_groups.items():
+                            durs = data["durs"]
+                            span_stats_list.append({
+                                "name": name,
+                                "count": len(durs),
+                                "avg_ms": sum(durs) / len(durs) if durs else 0,
+                                "max_ms": max(durs) if durs else 0,
+                                "error_rate": data["errs"] / len(durs) if durs else 0,
+                            })
+
+                        # Build findings list
+                        findings_dicts = [
+                            {
+                                "agent_name": f.agent_name,
+                                "finding_type": f.finding_type.value,
+                                "severity": f.severity.value,
+                                "summary": f.summary,
+                                "confidence": f.confidence,
+                            }
+                            for f in report.findings
+                        ]
+
+                        # Detect unique services
+                        services = set()
+                        for s in spans:
+                            svc = s.get("service_name") or s.get("resource", {}).get("service.name", "unknown")
+                            services.add(svc)
+                        service_name = ", ".join(services) if services else "unknown"
+
+                        _storage.save_analysis(
+                            service=service_name,
+                            project=_project_path or "",
+                            severity=report.severity.value,
+                            confidence=report.confidence,
+                            root_cause=report.root_cause,
+                            summary=report.summary,
+                            llm_backend=report.metadata.get("llm_backend", ""),
+                            total_spans=len(spans),
+                            total_traces=len(set(s.get("trace_id", "") for s in spans)),
+                            error_count=sum(1 for s in spans if s.get("error")),
+                            avg_latency_ms=avg_lat,
+                            p95_latency_ms=p95_lat,
+                            max_latency_ms=max_lat,
+                            report_path=report_path or "",
+                            span_stats=span_stats_list,
+                            findings_list=findings_dicts,
+                        )
+                    except Exception as e:
+                        log.warning("Storage persistence failed: %s", e)
+
                 self._send(200, result)
                 _buffer.clear()
                 log.info("Analysis complete — severity: %s, confidence: %s",
@@ -412,8 +511,93 @@ class OTLPHandler(BaseHTTPRequestHandler):
                     log.info("Code correlations: %d spans mapped to source",
                              len(source_map))
 
+                # Save session context for interactive follow-up
+                global _last_analysis
+                _last_analysis = {
+                    "report": report,
+                    "spans": spans,
+                    "code_context": code_context,
+                    "source_map": source_map,
+                }
+
             except Exception as e:
                 log.error("Analysis failed: %s", e)
+                self._send(500, {"error": str(e)})
+
+        elif self.path == "/v1/ask":
+            # Interactive follow-up — ask questions about the last analysis
+            try:
+                payload = json.loads(body) if body else {}
+                question = payload.get("question", "")
+
+                if not question:
+                    self._send(400, {"error": "Missing 'question' field"})
+                    return
+
+                if not _last_analysis:
+                    self._send(200, {
+                        "answer": "No analysis available yet. Run /v1/analyze first.",
+                        "status": "no_context",
+                    })
+                    return
+
+                # Build follow-up prompt with previous context
+                report = _last_analysis["report"]
+                code_ctx = _last_analysis.get("code_context", "")
+
+                follow_up_prompt = (
+                    f"Previous analysis found: {report.root_cause}\n"
+                    f"Severity: {report.severity.value}, Confidence: {report.confidence:.0%}\n"
+                    f"Summary: {report.summary}\n\n"
+                )
+                if code_ctx:
+                    follow_up_prompt += f"Code context:\n{code_ctx[:3000]}\n\n"
+                follow_up_prompt += f"Follow-up question: {question}\n"
+                follow_up_prompt += "\nPlease provide a detailed answer based on the analysis above."
+
+                # Use LLM for follow-up
+                try:
+                    from inferra.llm_agent import get_llm_backend
+                    backend = get_llm_backend()
+                    if backend:
+                        answer = backend.call(
+                            follow_up_prompt,
+                            system="You are Inferra, an AI debugging assistant. Answer follow-up questions about the previous RCA analysis.",
+                            max_tokens=1500,
+                        )
+                        self._send(200, {
+                            "answer": answer or "Unable to generate response",
+                            "status": "answered",
+                            "llm_backend": backend.display_name(),
+                        })
+                    else:
+                        self._send(200, {
+                            "answer": "No LLM backend available for follow-up",
+                            "status": "no_llm",
+                        })
+                except Exception as e:
+                    self._send(500, {"error": f"Follow-up failed: {e}"})
+
+            except json.JSONDecodeError:
+                self._send(400, {"error": "Invalid JSON"})
+
+        elif self.path == "/v1/topology":
+            # Generate topology from buffered spans
+            spans = _buffer.get_all()
+            if not spans:
+                self._send(200, {"error": "No spans in buffer"})
+                return
+            try:
+                from inferra.topology import Topology
+                topo = Topology()
+                topo.build_from_spans(spans)
+                result = {
+                    "summary": topo.summary(),
+                    "mermaid": topo.to_mermaid(),
+                    "graph": topo.to_d3_json(),
+                }
+                self._send(200, result)
+            except Exception as e:
                 self._send(500, {"error": str(e)})
 
         else:
@@ -556,7 +740,7 @@ def _generate_otlp_report(spans, report, source_map=None):
         "unique_tokens": f"{max_latency:.0f}ms",
     }
 
-    # ── Entry points (operations) with status ──
+    # ── Discovered operations with status ──
     # For each unique operation, determine overall success/failure
     success_names = set()
     failure_dict = {}
@@ -569,7 +753,7 @@ def _generate_otlp_report(spans, report, source_map=None):
 
     successes = [(name, "") for name in success_names]
     failures = [(name, err) for name, err in failure_dict.items()]
-    entry_points = sorted(unique_ops)
+    discovered_ops = sorted(unique_ops)
 
     # ── Build hierarchical call tree by trace ──
     total_duration = sum(s.get("duration_ms", 0) for s in spans)
@@ -702,7 +886,7 @@ def _generate_otlp_report(spans, report, source_map=None):
         "report": report,
         "successes": successes,
         "failures": failures,
-        "entry_points": entry_points,
+        "entry_points": discovered_ops,
         "graph_summary": graph_summary,
         "graph_tree": graph_tree,
         "diagnosis": (
@@ -742,7 +926,7 @@ _start_time = time.time()
 
 def serve(host="0.0.0.0", port=4318, project=None):
     """Start the OTLP receiver, optionally indexing a project for code correlation."""
-    global _indexer, _project_path
+    global _indexer, _project_path, _storage
     _lazy_imports()
 
     logging.basicConfig(
@@ -750,6 +934,14 @@ def serve(host="0.0.0.0", port=4318, project=None):
         format="%(asctime)s  [%(name)s]  %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    # ── Initialize persistence ──
+    try:
+        from inferra.storage import Storage
+        _storage = Storage()
+    except Exception as e:
+        log.warning("Storage disabled: %s", e)
+        _storage = None
 
     # ── Index project codebase if provided ──
     if project:
@@ -767,11 +959,13 @@ def serve(host="0.0.0.0", port=4318, project=None):
 
     server = HTTPServer((host, port), OTLPHandler)
     log.info("Inferra OTLP receiver listening on %s:%d", host, port)
-    log.info("  POST /v1/traces   — Accept OTLP spans")
-    log.info("  POST /v1/analyze  — Trigger RCA on buffered spans%s",
+    log.info("  POST /v1/traces      — Accept OTLP spans")
+    log.info("  POST /v1/analyze     — Trigger RCA on buffered spans%s",
              " (+ code correlation)" if _indexer else "")
-    log.info("  GET  /v1/traces   — View buffered spans")
-    log.info("  GET  /healthz     — Health check")
+    log.info("  GET  /v1/traces      — View buffered spans")
+    log.info("  GET  /v1/history     — View analysis history")
+    log.info("  GET  /v1/regressions — Detect performance regressions")
+    log.info("  GET  /healthz        — Health check")
     log.info("")
     log.info("Configure your app:")
     log.info("  export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:%d", port)
@@ -781,6 +975,8 @@ def serve(host="0.0.0.0", port=4318, project=None):
         server.serve_forever()
     except KeyboardInterrupt:
         log.info("Shutting down.")
+        if _storage:
+            _storage.close()
         server.server_close()
 
 

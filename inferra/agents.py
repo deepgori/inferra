@@ -48,6 +48,19 @@ class FindingType(Enum):
     DATA_ERROR = "data_error"
     CASCADING_FAILURE = "cascading_failure"
     THREAD_CONTENTION = "thread_contention"
+    # v0.4.0: Dependency analysis
+    CIRCULAR_DEPENDENCY = "circular_dependency"
+    HIGH_FAN_OUT = "high_fan_out"
+    DEAD_CODE = "dead_code"
+    TIGHT_COUPLING = "tight_coupling"
+    DEEP_CALL_CHAIN = "deep_call_chain"
+    # v0.4.0: Security findings
+    SQL_INJECTION = "sql_injection"
+    HARDCODED_SECRET = "hardcoded_secret"
+    UNSAFE_DESERIALIZATION = "unsafe_deserialization"
+    SSRF = "ssrf"
+    PATH_TRAVERSAL = "path_traversal"
+    MISSING_AUTH = "missing_auth"
     UNKNOWN = "unknown"
 
 

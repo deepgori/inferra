@@ -6,13 +6,18 @@ indexes the associated codebase into a searchable store, and uses
 multi-agent reasoning to produce Root Cause Analysis (RCA).
 
 Architecture:
-    1. CodeIndexer — Multi-stack indexer (Python, SQL, YAML, .env, TOML)
+    1. CodeIndexer — Multi-stack indexer (Python, JS/TS, Go, Java, SQL, YAML)
     2. RAGPipeline — Retrieves relevant code context given a telemetry signal
     3. Multi-Agent System:
        - LogAnalysisAgent — Specializes in parsing and interpreting log/trace events
        - MetricsCorrelationAgent — Correlates timing anomalies and patterns
+       - DependencyAgent — Analyzes call graphs and module coupling
+       - SecurityAgent — Scans for common security vulnerabilities
        - CoordinatorAgent — Synthesizes findings into a unified RCA
     4. RCAEngine — Orchestrates the full investigation pipeline
+    5. Storage — SQLite persistence for historical analysis tracking
+    6. StreamingAnalyzer — Real-time anomaly detection
+    7. Topology — Multi-service graph visualization
 
 The module integrates with async_content_tracer's TraceEvents and ExecutionGraph
 to form a complete observability → debugging pipeline.
@@ -44,8 +49,14 @@ from inferra.llm_agent import (
 )
 
 from inferra.api import analyze, AnalysisResult
+from inferra.storage import Storage
+from inferra.streaming import StreamingAnalyzer
+from inferra.dependency_agent import DependencyAgent
+from inferra.security_agent import SecurityAgent
+from inferra.topology import Topology
+from inferra.pr_generator import PRGenerator
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "CodeIndexer",
     "RAGPipeline",
@@ -66,4 +77,11 @@ __all__ = [
     "GroqBackend",
     "OllamaBackend",
     "get_llm_backend",
+    "Storage",
+    "StreamingAnalyzer",
+    "DependencyAgent",
+    "SecurityAgent",
+    "Topology",
+    "PRGenerator",
 ]
+
