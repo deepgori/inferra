@@ -67,3 +67,6 @@ strie_demo.py
 # API keys / secrets
 .env
 *.key
+stress_test.py
+*.db-shm
+*.db-wal
