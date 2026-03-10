@@ -20,6 +20,8 @@ import unittest
 from inferra.indexer import CodeIndexer, CodeUnit
 from inferra.agents import FindingType, Severity
 
+_HAS_TEST_PROJECTS = os.path.isdir("./test_projects/agentic_cybersec_threat_analyst/backend")
+
 
 # ─── Phase 1: Multi-Language Parsers ─────────────────────────────────────────
 
@@ -403,6 +405,7 @@ class TestDependencyAgent(unittest.TestCase):
         findings = self.agent.analyze_codebase()
         self.assertEqual(findings, [])
 
+    @unittest.skipUnless(_HAS_TEST_PROJECTS, "test_projects not available in CI")
     def test_finds_high_fanout(self):
         idx = CodeIndexer()
         idx.index_directory("./test_projects/agentic_cybersec_threat_analyst/backend")
@@ -411,6 +414,7 @@ class TestDependencyAgent(unittest.TestCase):
         fanout = [f for f in findings if f.finding_type == FindingType.HIGH_FAN_OUT]
         self.assertTrue(len(fanout) > 0)
 
+    @unittest.skipUnless(_HAS_TEST_PROJECTS, "test_projects not available in CI")
     def test_uses_correct_finding_types(self):
         idx = CodeIndexer()
         idx.index_directory("./test_projects/agentic_cybersec_threat_analyst/backend")
@@ -444,6 +448,7 @@ class TestSecurityAgent(unittest.TestCase):
         findings = self.agent.analyze_codebase()
         self.assertEqual(findings, [])
 
+    @unittest.skipUnless(_HAS_TEST_PROJECTS, "test_projects not available in CI")
     def test_detects_hardcoded_secrets(self):
         idx = CodeIndexer()
         idx.index_directory("./test_projects/agentic_cybersec_threat_analyst/backend")
@@ -452,6 +457,7 @@ class TestSecurityAgent(unittest.TestCase):
         secrets = [f for f in findings if f.finding_type == FindingType.HARDCODED_SECRET]
         self.assertTrue(len(secrets) > 0)
 
+    @unittest.skipUnless(_HAS_TEST_PROJECTS, "test_projects not available in CI")
     def test_uses_correct_finding_types(self):
         idx = CodeIndexer()
         idx.index_directory("./test_projects/agentic_cybersec_threat_analyst/backend")
@@ -466,6 +472,7 @@ class TestSecurityAgent(unittest.TestCase):
             self.assertIn(f.finding_type, valid_types,
                          f"SecurityAgent used wrong FindingType: {f.finding_type}")
 
+    @unittest.skipUnless(_HAS_TEST_PROJECTS, "test_projects not available in CI")
     def test_all_findings_have_severity(self):
         idx = CodeIndexer()
         idx.index_directory("./test_projects/agentic_cybersec_threat_analyst/backend")
@@ -480,6 +487,7 @@ class TestSecurityAgent(unittest.TestCase):
 class TestAutoInstrument(unittest.TestCase):
     """Tests for the auto-instrumentation script generator."""
 
+    @unittest.skipUnless(_HAS_TEST_PROJECTS, "test_projects not available in CI")
     def test_generates_instrumentation_script(self):
         from inferra.auto_instrument import generate_instrumentation_script
         idx = CodeIndexer()
