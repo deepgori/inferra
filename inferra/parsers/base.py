@@ -3,6 +3,7 @@ base.py — Language Parser Base Class & Registry
 
 All language parsers inherit from LanguageParser and implement parse().
 The registry auto-selects the right parser based on file extension.
+Tree-sitter parsers take priority over regex-based parsers when available.
 """
 
 from abc import ABC, abstractmethod
@@ -39,6 +40,22 @@ class LanguageParser(ABC):
         """
         ...
 
+    def parse_file(self, filepath: str, content: str) -> List[CodeUnit]:
+        """Alternative parse interface used by tree-sitter parsers.
+
+        Default: delegates to parse(). Tree-sitter parsers override this.
+        """
+        module_name = Path(filepath).stem
+        return self.parse(content, filepath, module_name)
+
+    def can_parse(self) -> bool:
+        """Return True if this parser can actually parse files.
+
+        Tree-sitter parsers return False if tree-sitter is not installed,
+        allowing the registry to fall back to regex parsers.
+        """
+        return True
+
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize text for TF-IDF search (shared across parsers)."""
         import re
@@ -67,22 +84,41 @@ class LanguageParser(ABC):
 # ── Parser Registry ──────────────────────────────────────────────────────────
 
 _PARSERS: Dict[str, Type[LanguageParser]] = {}
+_FALLBACK_PARSERS: Dict[str, Type[LanguageParser]] = {}
 
 SUPPORTED_EXTENSIONS: Dict[str, str] = {}  # ext → language
 
 
 def register_parser(parser_class: Type[LanguageParser]):
-    """Register a parser class for its declared extensions."""
+    """Register a parser class for its declared extensions.
+
+    If a parser is already registered for an extension, the new parser
+    takes priority and the old one becomes the fallback. This lets
+    tree-sitter parsers override regex parsers when imported later.
+    """
     for ext in parser_class.EXTENSIONS:
+        existing = _PARSERS.get(ext)
+        if existing:
+            _FALLBACK_PARSERS[ext] = existing
         _PARSERS[ext] = parser_class
         SUPPORTED_EXTENSIONS[ext] = parser_class.LANGUAGE
     return parser_class
 
 
 def get_parser_for_file(filepath: str) -> Optional[LanguageParser]:
-    """Get the appropriate parser instance for a file based on extension."""
+    """Get the appropriate parser instance for a file based on extension.
+
+    Returns the tree-sitter parser if available and can_parse() returns True,
+    otherwise falls back to the regex parser.
+    """
     ext = Path(filepath).suffix.lower()
     parser_class = _PARSERS.get(ext)
     if parser_class:
-        return parser_class()
+        instance = parser_class()
+        if instance.can_parse():
+            return instance
+        # Fall back to regex parser
+        fallback_class = _FALLBACK_PARSERS.get(ext)
+        if fallback_class:
+            return fallback_class()
     return None

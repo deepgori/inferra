@@ -609,14 +609,24 @@ class OTLPHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def _correlate_spans_to_code(spans, trace_events):
-    """Map OTLP span names to source code via the CodeIndexer."""
+    """Map OTLP span names to source code via the CodeIndexer.
+
+    Uses an 8-stage matching cascade, from most specific to most fuzzy:
+      1. code.function span attribute (explicit)
+      2. Exact route match (GET /products → @app.get("/products"))
+      3. HTTP semantic conventions (http.route + http.method)
+      4. Fuzzy route with ID stripping (/products/123 → /products/{id})
+      5. Exact function name match
+      6. Span name keyword decomposition (mongodb.products.aggregate → keywords)
+      7. DB statement / body pattern match (db.statement → function body grep)
+      8. TF-IDF fuzzy search (fallback)
+    """
     source_map = {}
 
     if not _indexer:
         return source_map
 
     def _add_to_map(name, unit, match_type="exact"):
-        # Include full code for LLM analysis, snippet for HTML display
         source_map[name] = {
             "file": os.path.basename(unit.source_file),
             "full_path": unit.source_file,
@@ -628,20 +638,23 @@ def _correlate_spans_to_code(spans, trace_events):
             "match_type": match_type,
         }
 
-    # Collect unique span names + http.route attributes to search for
+    # Collect unique span names + attributes to search for
     seen = set()
     for s in spans:
         name = s.get("name", "")
         attrs = s.get("attributes", {})
         http_route = attrs.get("http.route", "")
-        http_method = attrs.get("http.method", "")
+        http_target = attrs.get("http.target", "") or attrs.get("url.path", "")
+        http_method = attrs.get("http.method", "") or attrs.get("http.request.method", "")
+        db_statement = attrs.get("db.statement", "")
+        db_operation = attrs.get("db.operation", "")
+        db_collection = attrs.get("db.mongodb.collection", "") or attrs.get("db.sql.table", "")
+        service_name = s.get("service", "")
 
         if name and name not in seen:
             seen.add(name)
 
-            # 0. Try code.function attribute (set by manual OTel spans)
-            #    This is the most reliable — the span author explicitly
-            #    tells us which function it wraps.
+            # ── Stage 1: code.function attribute (explicit) ──
             code_func = attrs.get("code.function", "")
             if code_func:
                 unit = _indexer.search_by_function_name(code_func)
@@ -649,29 +662,89 @@ def _correlate_spans_to_code(spans, trace_events):
                     _add_to_map(name, unit, "code_attr")
                     continue
 
-            # 1. Try route matching on span name (e.g., "GET /places" → getPlaces)
+            # ── Stage 2: Exact route match ──
             unit = _indexer.search_by_route(name)
             if unit:
                 _add_to_map(name, unit, "route")
                 continue
 
-            # 2. Try http.route attribute (FastAPI sets this to resolved path)
-            #    e.g., http.route="/api/articles/{slug}", http.method="GET"
+            # ── Stage 3: HTTP semantic conventions ──
             if http_route and http_method:
-                route_span = f"{http_method} {http_route}"
+                route_span = f"{http_method.upper()} {http_route}"
                 unit = _indexer.search_by_route(route_span)
                 if unit:
-                    _add_to_map(name, unit, "http_route")
+                    _add_to_map(name, unit, "http_semconv")
                     continue
 
-            # 3. Try exact function name match
+            # ── Stage 4: Fuzzy route with ID stripping ──
+            route_path = http_route or http_target
+            if route_path:
+                unit = _indexer.search_by_route_fuzzy(route_path)
+                if unit:
+                    _add_to_map(name, unit, "route_fuzzy")
+                    continue
+                # Also try with method prefix
+                if http_method:
+                    unit = _indexer.search_by_route(f"{http_method.upper()} {route_path}")
+                    if not unit:
+                        unit = _indexer.search_by_route_fuzzy(route_path)
+                    if unit:
+                        _add_to_map(name, unit, "route_fuzzy")
+                        continue
+
+            # ── Stage 5: Exact function name match ──
             clean_name = name.split(".")[-1].replace(" ", "_")
             unit = _indexer.search_by_function_name(clean_name)
             if unit:
                 _add_to_map(name, unit, "exact")
                 continue
 
-            # 4. Fallback: TF-IDF search
+            # ── Stage 6: Span name keyword decomposition ──
+            # 'mongodb.products.aggregate' → ['mongodb', 'products', 'aggregate']
+            # 'express.middleware.authMiddleware' → ['express', 'middleware', 'authMiddleware']
+            import re as _re
+            keywords = _re.split(r'[.\-_/\s]+', name)
+            if len(keywords) >= 2:
+                results = _indexer.search_functions_by_keywords(keywords, max_results=1)
+                if results:
+                    _add_to_map(name, results[0], "keyword_decomp")
+                    continue
+
+            # ── Stage 7: DB statement / body pattern matching ──
+            # If span has db.statement or db collection info, search code bodies
+            body_pattern = None
+            if db_statement:
+                # Extract table/collection name from SQL: SELECT * FROM users → 'users'
+                table_match = _re.search(
+                    r'(?:FROM|INTO|UPDATE|JOIN)\s+[`"\']?(\w+)',
+                    db_statement, _re.IGNORECASE
+                )
+                if table_match:
+                    body_pattern = table_match.group(1)
+            elif db_collection:
+                body_pattern = db_collection
+            elif db_operation:
+                # e.g. db.operation='aggregate', combine with collection
+                body_pattern = db_operation
+
+            if body_pattern:
+                results = _indexer.search_by_body_pattern(body_pattern, max_results=1)
+                if results:
+                    _add_to_map(name, results[0], "db_pattern")
+                    continue
+
+                # Also try service name + body pattern for better targeting
+                if service_name and service_name != "unknown":
+                    svc_keyword = service_name.split("-")[0].split("_")[0]
+                    svc_units = _indexer.search_by_filepath_keyword(svc_keyword)
+                    for su in svc_units:
+                        if body_pattern.lower() in su.body_text.lower():
+                            _add_to_map(name, su, "service_body")
+                            break
+                    if name in source_map:
+                        continue
+
+            # ── Stage 8: TF-IDF fuzzy search (fallback) ──
             search_results = _indexer.search(name, top_k=1)
             if search_results and search_results[0].score > 0.15:
                 sr_unit = search_results[0].code_unit
@@ -688,6 +761,7 @@ def _correlate_spans_to_code(spans, trace_events):
                 }
 
     return source_map
+
 
 
 def _generate_otlp_report(spans, report, source_map=None):

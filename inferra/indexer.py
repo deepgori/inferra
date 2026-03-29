@@ -848,6 +848,102 @@ class CodeIndexer:
         """Get all code units in a specific file."""
         return self._file_map.get(filepath, [])
 
+    # ------------------------------------------------------------------
+    # v0.5.0 — Advanced correlation search methods
+    # ------------------------------------------------------------------
+
+    def search_by_body_pattern(self, pattern: str, max_results: int = 3) -> List[CodeUnit]:
+        """Find code units whose body contains a string pattern.
+
+        Useful for matching DB queries (e.g. 'products.aggregate') or
+        library calls (e.g. 'redis.get') to the functions that use them.
+        """
+        pattern_lower = pattern.lower()
+        results = []
+        for unit in self._units:
+            if "function" in unit.unit_type or unit.unit_type == "method":
+                body = unit.body_text.lower()
+                if pattern_lower in body:
+                    results.append(unit)
+                    if len(results) >= max_results:
+                        break
+        return results
+
+    def search_by_filepath_keyword(self, keyword: str) -> List[CodeUnit]:
+        """Return all code units from files whose path contains keyword.
+
+        Useful for service-name → directory mapping: if the span's service
+        is 'product-service', search for units in files containing 'product'.
+        """
+        keyword_lower = keyword.lower()
+        results = []
+        for fpath, units in self._file_map.items():
+            if keyword_lower in fpath.lower():
+                results.extend(units)
+        return results
+
+    def search_by_route_fuzzy(self, path: str) -> Optional[CodeUnit]:
+        """Match a request path to a route after stripping numeric IDs.
+
+        '/api/products/12345' → '/api/products/{id}'
+        '/users/42/orders'    → '/users/{id}/orders'
+        """
+        import re
+        # Replace numeric path segments with {id} placeholder
+        normalized = re.sub(r'/\d+', '/{id}', path)
+        # Also try with MongoDB-style hex IDs
+        normalized2 = re.sub(r'/[0-9a-f]{24}', '/{id}', path)
+
+        for unit in self._units:
+            if not unit.route_path:
+                continue
+            _, route_pattern = unit.route_path.split(" ", 1) if " " in unit.route_path else ("", unit.route_path)
+            if route_pattern == normalized or route_pattern == normalized2:
+                return unit
+            if normalized.endswith(route_pattern) or normalized2.endswith(route_pattern):
+                return unit
+            # Also try the route_matches helper for param patterns
+            if self._route_matches(route_pattern, normalized):
+                return unit
+        return None
+
+    def search_functions_by_keywords(self, keywords: List[str], max_results: int = 3) -> List[CodeUnit]:
+        """Find functions matching multiple keywords by relevance score.
+
+        Decomposes span names like 'mongodb.products.aggregate' into
+        ['mongodb', 'products', 'aggregate'] and scores each code unit
+        by how many keywords appear in its name, body, or file path.
+        """
+        keywords_lower = [k.lower() for k in keywords if len(k) > 2]
+        if not keywords_lower:
+            return []
+
+        scored = []
+        for unit in self._units:
+            if unit.unit_type not in ("function", "method", "async_function"):
+                continue
+            score = 0
+            name_lower = unit.name.lower()
+            qual_lower = unit.qualified_name.lower()
+            body_lower = unit.body_text[:2000].lower()
+            path_lower = unit.source_file.lower()
+
+            for kw in keywords_lower:
+                if kw in name_lower:
+                    score += 3  # Name match is strongest signal
+                elif kw in qual_lower:
+                    score += 2
+                elif kw in path_lower:
+                    score += 1.5
+                elif kw in body_lower:
+                    score += 1
+
+            if score > 0:
+                scored.append((score, unit))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [unit for _, unit in scored[:max_results]]
+
     def stats(self) -> dict:
         """Get indexing statistics."""
         return {
