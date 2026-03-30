@@ -91,6 +91,12 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_analyses_service ON analyses(service);
             CREATE INDEX IF NOT EXISTS idx_analyses_timestamp ON analyses(timestamp);
             CREATE INDEX IF NOT EXISTS idx_span_stats_analysis ON span_stats(analysis_id);
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id  TEXT PRIMARY KEY,
+                data        TEXT NOT NULL DEFAULT '{}',
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
         self._conn.commit()
 
@@ -330,5 +336,37 @@ class Storage:
             "db_path": self._db_path,
         }
 
+    # ------------------------------------------------------------------
+    # v0.5.0 — Session persistence for /v1/ask follow-up
+    # ------------------------------------------------------------------
+
+    def save_session(self, session_id: str, session_data: Dict[str, Any]) -> None:
+        """Save an analysis session context for interactive follow-up.
+
+        Persists to SQLite so /v1/ask survives server restarts.
+        """
+        self._conn.execute(
+            """INSERT OR REPLACE INTO sessions (session_id, data, updated_at)
+            VALUES (?, ?, datetime('now'))""",
+            (session_id, json.dumps(session_data, default=str)),
+        )
+        self._conn.commit()
+
+    def load_session(self, session_id: str = "latest") -> Optional[Dict[str, Any]]:
+        """Load the most recent analysis session or a specific one."""
+        if session_id == "latest":
+            row = self._conn.execute(
+                "SELECT data FROM sessions ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT data FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row:
+            return json.loads(row["data"])
+        return None
+
     def close(self):
         self._conn.close()
+

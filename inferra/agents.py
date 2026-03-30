@@ -61,6 +61,10 @@ class FindingType(Enum):
     SSRF = "ssrf"
     PATH_TRAVERSAL = "path_traversal"
     MISSING_AUTH = "missing_auth"
+    # v0.5.0: Additional security findings
+    XSS = "xss"
+    OPEN_REDIRECT = "open_redirect"
+    WEAK_CRYPTO = "weak_crypto"
     UNKNOWN = "unknown"
 
 
@@ -425,18 +429,19 @@ class LogAnalysisAgent(BaseAgent):
 
 class MetricsCorrelationAgent(BaseAgent):
     """
-    Specializes in analyzing timing and performance patterns.
+    Specializes in analyzing timing and performance patterns (v0.5.0).
 
     Detects:
-    - Slow spans (outliers in duration)
+    - Statistical outliers (>2σ per span name, not flat threshold)
+    - Self-time bottlenecks (parent is slow because of its own code, not children)
     - Cross-thread performance issues
     - Bottleneck identification (longest path in DAG)
-    - Timing anomaly correlation
+    - Bimodal latency distributions (intermittent external issues)
     """
 
     def __init__(self, slow_threshold_ms: float = 100.0):
         super().__init__("MetricsCorrelationAgent")
-        self._slow_threshold_ms = slow_threshold_ms
+        self._slow_threshold_ms = slow_threshold_ms  # absolute fallback
 
     def analyze(
         self,
@@ -445,10 +450,15 @@ class MetricsCorrelationAgent(BaseAgent):
     ) -> List[Finding]:
         findings = []
 
-        # ── Detect Slow Spans ──
-        slow_spans = self._find_slow_spans(graph)
-        if slow_spans:
-            findings.append(self._report_slow_spans(slow_spans, graph))
+        # ── Detect Statistical Outliers ──
+        outliers = self._find_statistical_outliers(graph)
+        if outliers:
+            findings.append(self._report_outliers(outliers, graph))
+
+        # ── Detect Self-Time Bottlenecks ──
+        self_time_bottlenecks = self._find_self_time_bottlenecks(graph)
+        if self_time_bottlenecks:
+            findings.append(self._report_self_time(self_time_bottlenecks))
 
         # ── Detect Cross-Thread Overhead ──
         cross_thread = graph.find_cross_thread_edges()
@@ -460,48 +470,216 @@ class MetricsCorrelationAgent(BaseAgent):
         if critical_path:
             findings.append(self._report_critical_path(critical_path))
 
+        # ── Detect Bimodal Distributions ──
+        bimodal = self._detect_bimodal_distributions(graph)
+        if bimodal:
+            findings.append(bimodal)
+
         return findings
 
-    def _find_slow_spans(self, graph: ExecutionGraph) -> List[SpanNode]:
-        """Find spans that exceed the slow threshold."""
-        slow = []
-        for node in graph.nodes.values():
-            if node.duration and (node.duration * 1000) > self._slow_threshold_ms:
-                slow.append(node)
-        return sorted(slow, key=lambda n: n.duration or 0, reverse=True)
+    def _find_statistical_outliers(self, graph: ExecutionGraph) -> List[SpanNode]:
+        """Find spans that are statistical outliers for their operation name.
 
-    def _report_slow_spans(
-        self, slow_spans: List[SpanNode], graph: ExecutionGraph
+        Groups spans by name, calculates mean + stddev, and flags spans
+        that exceed mean + 2*stddev. Falls back to the absolute threshold
+        when there aren't enough data points for statistics.
+        """
+        import math
+
+        # Group durations by span name
+        groups: Dict[str, List[float]] = {}
+        for node in graph.nodes.values():
+            if node.duration:
+                name = node.function_name
+                groups.setdefault(name, []).append(node.duration * 1000)  # ms
+
+        outliers = []
+        for node in graph.nodes.values():
+            if not node.duration:
+                continue
+            dur_ms = node.duration * 1000
+            name = node.function_name
+            group = groups.get(name, [])
+
+            if len(group) >= 3:
+                # Statistical check: flag if > mean + 2σ
+                mean = sum(group) / len(group)
+                variance = sum((x - mean) ** 2 for x in group) / len(group)
+                stddev = math.sqrt(variance) if variance > 0 else 0
+
+                threshold = mean + 2 * stddev
+                # Only flag if the threshold is meaningful (not near-zero stddev)
+                if stddev > 5 and dur_ms > threshold:
+                    outliers.append(node)
+            else:
+                # Not enough data — fall back to absolute threshold
+                if dur_ms > self._slow_threshold_ms:
+                    outliers.append(node)
+
+        return sorted(outliers, key=lambda n: n.duration or 0, reverse=True)
+
+    def _report_outliers(
+        self, outliers: List[SpanNode], graph: ExecutionGraph
     ) -> Finding:
-        """Report on slow span detection."""
-        total_slow_time = sum(s.duration for s in slow_spans if s.duration)
+        """Report statistical outlier detection."""
+        return Finding(
+            agent_name=self.name,
+            finding_type=FindingType.PERFORMANCE_ANOMALY,
+            severity=Severity.MEDIUM,
+            summary=f"{len(outliers)} performance outlier(s) detected (>2σ from mean)",
+            details=(
+                "The following spans are statistical outliers — significantly slower "
+                "than their peers with the same operation name: "
+                + ", ".join(
+                    f"{s.function_name} ({s.duration * 1000:.1f}ms)"
+                    for s in outliers[:5]
+                )
+            ),
+            evidence=[
+                f"{s.function_name}: {s.duration * 1000:.1f}ms (thread: {s.thread_name})"
+                for s in outliers
+            ],
+            affected_spans=[s.span_id for s in outliers],
+            confidence=0.90,
+            recommendations=[
+                "Profile the slowest outlier functions for optimization opportunities",
+                "Check if outliers correlate with external service degradation",
+                "Add caching for repeated computations that show high variance",
+            ],
+            source_locations=[
+                f"{s.source_file}:{s.source_line}" for s in outliers
+            ],
+        )
+
+    def _find_self_time_bottlenecks(self, graph: ExecutionGraph) -> List[Dict]:
+        """Find spans where self-time (total - children) is the dominant cost.
+
+        If a parent span is 500ms and its children account for only 50ms,
+        the parent's self-time is 450ms, meaning it's the real bottleneck
+        (not its children).
+        """
+        bottlenecks = []
+        for node in graph.nodes.values():
+            if not node.duration or node.duration * 1000 < self._slow_threshold_ms:
+                continue
+
+            # Sum children's duration
+            children = list(graph.graph.successors(node.span_id))
+            child_time = sum(
+                (graph.nodes[c].duration or 0) * 1000
+                for c in children
+                if c in graph.nodes
+            )
+            total_ms = node.duration * 1000
+            self_time_ms = total_ms - child_time
+
+            # Flag if self-time is > 60% of total and total is significant
+            if total_ms > 0 and (self_time_ms / total_ms) > 0.6 and self_time_ms > 50:
+                bottlenecks.append({
+                    "node": node,
+                    "total_ms": total_ms,
+                    "self_time_ms": self_time_ms,
+                    "child_time_ms": child_time,
+                    "self_pct": self_time_ms / total_ms,
+                })
+
+        return sorted(bottlenecks, key=lambda b: b["self_time_ms"], reverse=True)[:5]
+
+    def _report_self_time(self, bottlenecks: List[Dict]) -> Finding:
+        """Report self-time bottleneck analysis."""
+        evidence = []
+        for b in bottlenecks:
+            node = b["node"]
+            evidence.append(
+                f"{node.function_name}: {b['total_ms']:.0f}ms total, "
+                f"{b['self_time_ms']:.0f}ms self-time ({b['self_pct']:.0%}), "
+                f"{b['child_time_ms']:.0f}ms in children"
+            )
 
         return Finding(
             agent_name=self.name,
             finding_type=FindingType.PERFORMANCE_ANOMALY,
             severity=Severity.MEDIUM,
-            summary=f"{len(slow_spans)} slow span(s) detected (>{self._slow_threshold_ms}ms)",
+            summary=f"{len(bottlenecks)} self-time bottleneck(s) — slow code in the function itself",
             details=(
-                f"The following spans exceeded the {self._slow_threshold_ms}ms threshold: "
-                + ", ".join(
-                    f"{s.function_name} ({s.duration * 1000:.1f}ms)"
-                    for s in slow_spans[:5]
-                )
+                "These functions are slow due to their own code, not their children. "
+                "Self-time > 60% indicates the bottleneck is inside the function body, "
+                "not in downstream calls. Optimize the function itself, not its callees."
             ),
-            evidence=[
-                f"{s.function_name}: {s.duration * 1000:.1f}ms (thread: {s.thread_name})"
-                for s in slow_spans
-            ],
-            affected_spans=[s.span_id for s in slow_spans],
-            confidence=0.90,
+            evidence=evidence,
+            affected_spans=[b["node"].span_id for b in bottlenecks],
+            confidence=0.85,
             recommendations=[
-                "Profile the slowest functions for optimization opportunities",
-                "Check if slow spans are I/O-bound (consider async) or CPU-bound (consider threading)",
-                "Add caching for repeated computations",
+                "Profile the function body — the bottleneck is in its own code, not callees",
+                "Look for CPU-bound loops, blocking I/O, or repeated allocations",
+                "Consider async/threaded execution if self-time is I/O-bound",
             ],
             source_locations=[
-                f"{s.source_file}:{s.source_line}" for s in slow_spans
+                f"{b['node'].source_file}:{b['node'].source_line}" for b in bottlenecks
             ],
+        )
+
+    def _detect_bimodal_distributions(self, graph: ExecutionGraph) -> Optional[Finding]:
+        """Detect span names with bimodal latency distributions.
+
+        A bimodal distribution (e.g., 50ms cluster + 3000ms cluster) suggests
+        that something intermittent (external timeout, cache miss) is causing
+        some requests to be much slower than others.
+        """
+        groups: Dict[str, List[float]] = {}
+        for node in graph.nodes.values():
+            if node.duration:
+                groups.setdefault(node.function_name, []).append(node.duration * 1000)
+
+        bimodal_ops = []
+        for name, durations in groups.items():
+            if len(durations) < 4:
+                continue
+            durations.sort()
+            # Simple bimodality check: if the ratio of max to median is > 5x
+            # and there are values in both clusters
+            median = durations[len(durations) // 2]
+            max_val = durations[-1]
+            if median > 0 and max_val / median > 5:
+                fast_count = sum(1 for d in durations if d <= median * 2)
+                slow_count = len(durations) - fast_count
+                if slow_count >= 1:
+                    bimodal_ops.append({
+                        "name": name,
+                        "median_ms": median,
+                        "max_ms": max_val,
+                        "fast_count": fast_count,
+                        "slow_count": slow_count,
+                    })
+
+        if not bimodal_ops:
+            return None
+
+        return Finding(
+            agent_name=self.name,
+            finding_type=FindingType.PERFORMANCE_ANOMALY,
+            severity=Severity.MEDIUM,
+            summary=f"{len(bimodal_ops)} operation(s) with bimodal latency distribution",
+            details=(
+                "These operations show two distinct latency clusters, suggesting "
+                "intermittent issues (cache misses, external service timeouts, "
+                "connection pool exhaustion, or retry storms): "
+                + ", ".join(f"{b['name']} (median={b['median_ms']:.0f}ms, max={b['max_ms']:.0f}ms)"
+                           for b in bimodal_ops)
+            ),
+            evidence=[
+                f"{b['name']}: {b['fast_count']} fast ({b['median_ms']:.0f}ms) + "
+                f"{b['slow_count']} slow ({b['max_ms']:.0f}ms)"
+                for b in bimodal_ops
+            ],
+            affected_spans=[],
+            confidence=0.75,
+            recommendations=[
+                "Check if slow requests correlate with cache misses",
+                "Investigate external service health during slow request windows",
+                "Add circuit breakers to fail fast on intermittent downstream issues",
+            ],
+            source_locations=[],
         )
 
     def _analyze_cross_thread(

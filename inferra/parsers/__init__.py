@@ -24,6 +24,10 @@ try:
 except ImportError:
     pass
 try:
+    from .ts_typescript_parser import TreeSitterTypeScriptParser
+except ImportError:
+    pass
+try:
     from .ts_go_parser import TreeSitterGoParser
 except ImportError:
     pass

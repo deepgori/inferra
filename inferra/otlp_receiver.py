@@ -23,10 +23,15 @@ import logging
 import os
 import time
 import threading
+import concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
 log = logging.getLogger("inferra.otlp")
+
+# ── Configuration ──
+LLM_TIMEOUT_SECONDS = int(os.environ.get("INFERRA_LLM_TIMEOUT", "30"))
+LLM_MAX_RETRIES = int(os.environ.get("INFERRA_LLM_RETRIES", "1"))
 
 # ---------------------------------------------------------------------------
 # Internal span buffer
@@ -121,6 +126,24 @@ def _parse_protobuf_traces(data):
         return None
 
 
+def _validate_span(span):
+    """Validate that a span has the minimum required fields.
+    Returns True if valid, False if malformed."""
+    span_id = span.get("spanId", "")
+    trace_id = span.get("traceId", "")
+    if not span_id or not trace_id:
+        log.warning("Skipping malformed span: missing spanId or traceId")
+        return False
+    # Ensure timestamps are parseable
+    try:
+        int(span.get("startTimeUnixNano", 0))
+        int(span.get("endTimeUnixNano", 0))
+    except (ValueError, TypeError):
+        log.warning("Skipping span %s: invalid timestamps", span_id)
+        return False
+    return True
+
+
 def otlp_to_trace_events(otlp_payload):
     """
     Convert an OTLP ExportTraceServiceRequest (JSON) to a flat list
@@ -128,8 +151,12 @@ def otlp_to_trace_events(otlp_payload):
 
     OTLP structure:
         resourceSpans[] → scopeSpans[] → spans[]
+
+    Malformed spans (missing spanId/traceId or invalid timestamps)
+    are silently skipped with a warning.
     """
     events = []
+    skipped = 0
 
     for resource_span in otlp_payload.get("resourceSpans", []):
         # Extract service name from resource attributes
@@ -145,50 +172,62 @@ def otlp_to_trace_events(otlp_payload):
             lib_name = scope.get("name", "")
 
             for span in scope_span.get("spans", []):
-                start_ns = int(span.get("startTimeUnixNano", 0))
-                end_ns = int(span.get("endTimeUnixNano", 0))
-                duration_ms = _nano_to_ms(end_ns - start_ns)
-                error = _status_to_error(span.get("status"))
+                # ── Validate span before processing ──
+                if not _validate_span(span):
+                    skipped += 1
+                    continue
 
-                # Build attribute dict
-                attrs = {}
-                for attr in span.get("attributes", []):
-                    key = attr.get("key", "")
-                    val = attr.get("value", {})
-                    # Handle different OTLP value types
-                    for vtype in ("stringValue", "intValue", "doubleValue", "boolValue"):
-                        if vtype in val:
-                            attrs[key] = val[vtype]
-                            break
+                try:
+                    start_ns = int(span.get("startTimeUnixNano", 0))
+                    end_ns = int(span.get("endTimeUnixNano", 0))
+                    duration_ms = _nano_to_ms(end_ns - start_ns)
+                    error = _status_to_error(span.get("status"))
 
-                event = {
-                    "trace_id": span.get("traceId", ""),
-                    "span_id": span.get("spanId", ""),
-                    "parent_span_id": span.get("parentSpanId", ""),
-                    "name": span.get("name", "unnamed"),
-                    "service": service_name,
-                    "library": lib_name,
-                    "kind": _span_kind_name(span.get("kind", 0)),
-                    "start_time_ms": _nano_to_ms(start_ns),
-                    "end_time_ms": _nano_to_ms(end_ns),
-                    "duration_ms": round(duration_ms, 2),
-                    "status": "ERROR" if error else "OK",
-                    "error": error,
-                    "attributes": attrs,
-                    "events": [
-                        {
-                            "name": evt.get("name", ""),
-                            "time_ms": _nano_to_ms(int(evt.get("timeUnixNano", 0))),
-                            "attributes": {
-                                a["key"]: list(a["value"].values())[0]
-                                for a in evt.get("attributes", [])
-                                if a.get("value")
-                            },
-                        }
-                        for evt in span.get("events", [])
-                    ],
-                }
-                events.append(event)
+                    # Build attribute dict
+                    attrs = {}
+                    for attr in span.get("attributes", []):
+                        key = attr.get("key", "")
+                        val = attr.get("value", {})
+                        # Handle different OTLP value types
+                        for vtype in ("stringValue", "intValue", "doubleValue", "boolValue"):
+                            if vtype in val:
+                                attrs[key] = val[vtype]
+                                break
+
+                    event = {
+                        "trace_id": span.get("traceId", ""),
+                        "span_id": span.get("spanId", ""),
+                        "parent_span_id": span.get("parentSpanId", ""),
+                        "name": span.get("name", "unnamed"),
+                        "service": service_name,
+                        "library": lib_name,
+                        "kind": _span_kind_name(span.get("kind", 0)),
+                        "start_time_ms": _nano_to_ms(start_ns),
+                        "end_time_ms": _nano_to_ms(end_ns),
+                        "duration_ms": round(duration_ms, 2),
+                        "status": "ERROR" if error else "OK",
+                        "error": error,
+                        "attributes": attrs,
+                        "events": [
+                            {
+                                "name": evt.get("name", ""),
+                                "time_ms": _nano_to_ms(int(evt.get("timeUnixNano", 0))),
+                                "attributes": {
+                                    a["key"]: list(a["value"].values())[0]
+                                    for a in evt.get("attributes", [])
+                                    if a.get("value")
+                                },
+                            }
+                            for evt in span.get("events", [])
+                        ],
+                    }
+                    events.append(event)
+                except Exception as e:
+                    skipped += 1
+                    log.warning("Skipping span %s: %s", span.get("spanId", "?"), e)
+
+    if skipped:
+        log.info("Skipped %d malformed span(s) out of %d total", skipped, skipped + len(events))
 
     return events
 
@@ -340,14 +379,29 @@ class OTLPHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # ── Request-level error boundary ──
+            # Even if something goes wrong, we try to return partial results
+            partial_result = {
+                "status": "analyzed",
+                "span_count": len(spans),
+                "code_indexed": _indexer is not None,
+            }
+            report = None
+            source_map = {}
+            report_path = None
+
             try:
                 trace_events = spans_to_tracer_events(spans)
 
-                # ── Stage 1: Map spans to source code via 4-stage cascade ──
-                source_map = {}  # span_name → {file, line, full_code}
+                # ── Stage 1: Map spans to source code via 8-stage cascade ──
                 code_context = ""
                 if _indexer:
-                    source_map = _correlate_spans_to_code(spans, trace_events)
+                    try:
+                        source_map = _correlate_spans_to_code(spans, trace_events)
+                    except Exception as e:
+                        log.warning("Code correlation failed (continuing without): %s", e)
+                        source_map = {}
+
                     # Build full code context for the LLM
                     code_sections = []
                     for span_name, loc in source_map.items():
@@ -362,7 +416,6 @@ class OTLPHandler(BaseHTTPRequestHandler):
                         )
 
                     # ── Stage 2: RAG retrieval for causal chains ──
-                    # Build execution graph for causal chain analysis
                     try:
                         from inferra.rag import RAGPipeline
                         from async_content_tracer.graph import ExecutionGraph
@@ -371,7 +424,6 @@ class OTLPHandler(BaseHTTPRequestHandler):
                         graph.build_from_events(trace_events)
                         rag = RAGPipeline(_indexer, max_code_results=3)
 
-                        # Retrieve context for error spans
                         rag_sections = []
                         for node in graph.nodes.values():
                             if node.error:
@@ -393,20 +445,29 @@ class OTLPHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         log.debug("RAG retrieval skipped: %s", e)
 
-                # ── LLM analysis with code context ──
+                # ── LLM analysis with timeout + retry ──
                 engine = RCAEngine()
-                report = engine.investigate(trace_events, code_context=code_context)
+                llm_failed = False
+                try:
+                    report = _run_with_timeout(
+                        lambda: engine.investigate(trace_events, code_context=code_context),
+                        timeout=LLM_TIMEOUT_SECONDS,
+                        retries=LLM_MAX_RETRIES,
+                        label="RCA investigation",
+                    )
+                except Exception as e:
+                    log.warning("LLM-powered analysis failed: %s — falling back to heuristic-only", e)
+                    llm_failed = True
+                    # Fallback: run heuristic agents only (no LLM)
+                    report = _run_heuristic_only(engine, trace_events)
 
-                result = {
-                    "status": "analyzed",
-                    "span_count": len(spans),
+                partial_result.update({
                     "severity": report.severity.value,
                     "confidence": f"{report.confidence:.0%}",
                     "root_cause": report.root_cause,
                     "summary": report.summary,
                     "source_locations": report.source_locations,
                     "recommendations": report.recommendations,
-                    "code_indexed": _indexer is not None,
                     "code_correlations": len(source_map),
                     "findings": [
                         {
@@ -417,23 +478,28 @@ class OTLPHandler(BaseHTTPRequestHandler):
                         }
                         for f in report.findings
                     ],
-                }
+                })
+
+                if llm_failed:
+                    partial_result["warnings"] = ["LLM unavailable — results are heuristic-only"]
 
                 # Include LLM synthesis if available
                 llm_text = report.metadata.get("llm_synthesis")
                 if llm_text:
-                    result["llm_synthesis"] = llm_text
+                    partial_result["llm_synthesis"] = llm_text
 
                 # Generate HTML report (with source correlations)
-                report_path = _generate_otlp_report(spans, report, source_map)
-                if report_path:
-                    result["report_path"] = report_path
-                    log.info("HTML report saved: %s", report_path)
+                try:
+                    report_path = _generate_otlp_report(spans, report, source_map)
+                    if report_path:
+                        partial_result["report_path"] = report_path
+                        log.info("HTML report saved: %s", report_path)
+                except Exception as e:
+                    log.warning("HTML report generation failed: %s", e)
 
                 # ── Persist to storage ──
                 if _storage:
                     try:
-                        # Compute latency stats
                         durations = [s.get("duration_ms", 0) for s in spans]
                         durations.sort()
                         avg_lat = sum(durations) / len(durations) if durations else 0
@@ -441,7 +507,6 @@ class OTLPHandler(BaseHTTPRequestHandler):
                         p95_lat = durations[p95_idx] if p95_idx < len(durations) else 0
                         max_lat = max(durations) if durations else 0
 
-                        # Compute per-span stats
                         span_groups = {}
                         for s in spans:
                             name = s.get("name", "unknown")
@@ -463,7 +528,6 @@ class OTLPHandler(BaseHTTPRequestHandler):
                                 "error_rate": data["errs"] / len(durs) if durs else 0,
                             })
 
-                        # Build findings list
                         findings_dicts = [
                             {
                                 "agent_name": f.agent_name,
@@ -475,7 +539,6 @@ class OTLPHandler(BaseHTTPRequestHandler):
                             for f in report.findings
                         ]
 
-                        # Detect unique services
                         services = set()
                         for s in spans:
                             svc = s.get("service_name") or s.get("resource", {}).get("service.name", "unknown")
@@ -503,7 +566,7 @@ class OTLPHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         log.warning("Storage persistence failed: %s", e)
 
-                self._send(200, result)
+                self._send(200, partial_result)
                 _buffer.clear()
                 log.info("Analysis complete — severity: %s, confidence: %s",
                          report.severity.value, f"{report.confidence:.0%}")
@@ -513,28 +576,58 @@ class OTLPHandler(BaseHTTPRequestHandler):
 
                 # Save session context for interactive follow-up
                 global _last_analysis
+                import hashlib
+                session_id = hashlib.sha256(
+                    f"{time.time()}-{len(spans)}".encode()
+                ).hexdigest()[:12]
                 _last_analysis = {
-                    "report": report,
-                    "spans": spans,
-                    "code_context": code_context,
-                    "source_map": source_map,
+                    "session_id": session_id,
+                    "report_root_cause": report.root_cause,
+                    "report_severity": report.severity.value,
+                    "report_confidence": report.confidence,
+                    "report_summary": report.summary,
+                    "code_context": code_context[:5000],
+                    "span_count": len(spans),
+                    "source_map_keys": list(source_map.keys()),
                 }
+
+                if _storage:
+                    try:
+                        _storage.save_session(session_id, _last_analysis)
+                    except Exception as e:
+                        log.debug("Session persistence failed: %s", e)
+
+                partial_result["session_id"] = session_id
 
             except Exception as e:
                 log.error("Analysis failed: %s", e)
-                self._send(500, {"error": str(e)})
+                # Return whatever partial results we have
+                partial_result["status"] = "partial_failure"
+                partial_result["error"] = str(e)
+                if report:
+                    partial_result["severity"] = report.severity.value
+                    partial_result["root_cause"] = report.root_cause
+                self._send(200, partial_result)
 
         elif self.path == "/v1/ask":
             # Interactive follow-up — ask questions about the last analysis
             try:
                 payload = json.loads(body) if body else {}
                 question = payload.get("question", "")
+                req_session_id = payload.get("session_id", "")
 
                 if not question:
                     self._send(400, {"error": "Missing 'question' field"})
                     return
 
-                if not _last_analysis:
+                # Try in-memory first, then SQLite
+                session = _last_analysis
+                if not session and _storage:
+                    session = _storage.load_session(
+                        req_session_id if req_session_id else "latest"
+                    )
+
+                if not session:
                     self._send(200, {
                         "answer": "No analysis available yet. Run /v1/analyze first.",
                         "status": "no_context",
@@ -542,13 +635,12 @@ class OTLPHandler(BaseHTTPRequestHandler):
                     return
 
                 # Build follow-up prompt with previous context
-                report = _last_analysis["report"]
-                code_ctx = _last_analysis.get("code_context", "")
-
+                code_ctx = session.get("code_context", "")
                 follow_up_prompt = (
-                    f"Previous analysis found: {report.root_cause}\n"
-                    f"Severity: {report.severity.value}, Confidence: {report.confidence:.0%}\n"
-                    f"Summary: {report.summary}\n\n"
+                    f"Previous analysis found: {session.get('report_root_cause', 'unknown')}\n"
+                    f"Severity: {session.get('report_severity', 'unknown')}, "
+                    f"Confidence: {session.get('report_confidence', 0):.0%}\n"
+                    f"Summary: {session.get('report_summary', '')}\n\n"
                 )
                 if code_ctx:
                     follow_up_prompt += f"Code context:\n{code_ctx[:3000]}\n\n"
@@ -568,6 +660,7 @@ class OTLPHandler(BaseHTTPRequestHandler):
                         self._send(200, {
                             "answer": answer or "Unable to generate response",
                             "status": "answered",
+                            "session_id": session.get("session_id", ""),
                             "llm_backend": backend.display_name(),
                         })
                     else:
@@ -576,7 +669,11 @@ class OTLPHandler(BaseHTTPRequestHandler):
                             "status": "no_llm",
                         })
                 except Exception as e:
-                    self._send(500, {"error": f"Follow-up failed: {e}"})
+                    log.error("LLM follow-up failed: %s", e)
+                    self._send(200, {
+                        "answer": f"LLM is unavailable ({e}). The previous analysis found: {session.get('report_root_cause', 'unknown')}",
+                        "status": "llm_unavailable",
+                    })
 
             except json.JSONDecodeError:
                 self._send(400, {"error": "Invalid JSON"})
@@ -979,6 +1076,52 @@ def _generate_otlp_report(spans, report, source_map=None):
 
     generate_html_report(service_name, stats, trace_data, output_path)
     return os.path.abspath(output_path)
+
+
+# ---------------------------------------------------------------------------
+# LLM timeout / retry helpers
+# ---------------------------------------------------------------------------
+
+def _run_with_timeout(fn, timeout=30, retries=1, label="operation"):
+    """Run a function with a timeout and optional retry.
+    Uses a thread pool to enforce the timeout without killing the process.
+    """
+    last_error = None
+    for attempt in range(1 + retries):
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(fn)
+                return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            last_error = TimeoutError(f"{label} timed out after {timeout}s (attempt {attempt + 1}/{1 + retries})")
+            log.warning("%s", last_error)
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                log.warning("%s failed (attempt %d/%d): %s — retrying",
+                           label, attempt + 1, 1 + retries, e)
+            else:
+                raise
+    raise last_error
+
+
+def _run_heuristic_only(engine, trace_events):
+    """Fallback: run only heuristic agents (no LLM) when LLM is unavailable."""
+    from async_content_tracer.graph import ExecutionGraph
+    from inferra.agents import (
+        CoordinatorAgent, LogAnalysisAgent, MetricsCorrelationAgent,
+    )
+
+    graph = ExecutionGraph()
+    graph.build_from_events(trace_events)
+
+    heuristic_coord = CoordinatorAgent(
+        specialists=[LogAnalysisAgent(), MetricsCorrelationAgent()],
+    )
+    report = heuristic_coord.investigate(graph)
+    report.metadata["llm_available"] = False
+    report.metadata["fallback"] = "heuristic_only"
+    return report
 
 
 # ---------------------------------------------------------------------------

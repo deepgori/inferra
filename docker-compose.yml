@@ -1,0 +1,41 @@
+# Inferra + Ollama (local LLM) development stack
+#
+# Usage:
+#   docker compose up -d
+#   # Point your OTel-instrumented app at http://localhost:4318
+#   curl -X POST http://localhost:4318/v1/analyze
+
+services:
+  inferra:
+    build: .
+    ports:
+      - "4318:4318"
+    volumes:
+      - inferra-data:/data
+      # Uncomment and set your project path for code correlation:
+      # - /path/to/your/project:/code:ro
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - INFERRA_DB_PATH=/data/history.db
+    command: ["serve", "--port", "4318"]
+    depends_on:
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4318/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # Pull a model on first run:
+    # docker compose exec ollama ollama pull qwen2.5:7b
+
+volumes:
+  inferra-data:
+  ollama-models:
