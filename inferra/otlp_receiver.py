@@ -697,6 +697,167 @@ class OTLPHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(500, {"error": str(e)})
 
+        elif self.path == "/v1/analyze/stream":
+            # Streaming SSE endpoint — real-time analysis progress
+            spans = _buffer.get_all()
+            if not spans:
+                self._send(200, {"status": "no_data", "message": "No spans in buffer."})
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            def _sse(event: str, data: str):
+                self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
+                self.wfile.flush()
+
+            try:
+                _sse("progress", json.dumps({"step": "start", "message": f"Analyzing {len(spans)} spans..."}))
+
+                trace_events = spans_to_tracer_events(spans)
+                _sse("progress", json.dumps({"step": "parsed", "message": f"Parsed {len(trace_events)} trace events"}))
+
+                # Code correlation
+                source_map = {}
+                code_context = ""
+                if _indexer:
+                    _sse("progress", json.dumps({"step": "correlating", "message": "Mapping spans to source code..."}))
+                    try:
+                        source_map = _correlate_spans_to_code(spans, trace_events)
+                        _sse("progress", json.dumps({
+                            "step": "correlated",
+                            "message": f"Mapped {len(source_map)}/{len(set(s.get('name','') for s in spans))} spans to code",
+                        }))
+                        # Build code context
+                        code_sections = []
+                        for span_name, loc in source_map.items():
+                            code_sections.append(
+                                f"--- {span_name} → {loc['function']} ({loc['file']}:{loc['line']}) ---\n"
+                                f"{loc.get('full_code', loc.get('snippet', ''))}"
+                            )
+                        if code_sections:
+                            code_context = "\n\nSOURCE CODE for correlated spans:\n" + "\n\n".join(code_sections)
+                    except Exception as e:
+                        _sse("warning", json.dumps({"message": f"Code correlation failed: {e}"}))
+
+                # Agent analysis
+                _sse("progress", json.dumps({"step": "agents", "message": "Running multi-agent analysis..."}))
+                engine = RCAEngine()
+                try:
+                    report = _run_with_timeout(
+                        lambda: engine.investigate(trace_events, code_context=code_context),
+                        timeout=LLM_TIMEOUT_SECONDS, retries=LLM_MAX_RETRIES,
+                        label="RCA investigation",
+                    )
+                    _sse("progress", json.dumps({
+                        "step": "llm_complete",
+                        "message": f"LLM synthesis complete — {len(report.findings)} finding(s)",
+                    }))
+                except Exception as e:
+                    _sse("warning", json.dumps({"message": f"LLM unavailable: {e} — using heuristic fallback"}))
+                    report = _run_heuristic_only(engine, trace_events)
+
+                # Emit individual findings
+                for f in report.findings:
+                    _sse("finding", json.dumps({
+                        "agent": f.agent_name,
+                        "type": f.finding_type.value,
+                        "summary": f.summary,
+                        "confidence": f"{f.confidence:.0%}",
+                    }))
+
+                # HTML report
+                report_path = None
+                try:
+                    report_path = _generate_otlp_report(spans, report, source_map)
+                    if report_path:
+                        _sse("progress", json.dumps({"step": "report", "message": f"HTML report saved"}))
+                except Exception:
+                    pass
+
+                # Final result
+                result = {
+                    "status": "analyzed",
+                    "severity": report.severity.value,
+                    "confidence": f"{report.confidence:.0%}",
+                    "root_cause": report.root_cause,
+                    "summary": report.summary,
+                    "code_correlations": len(source_map),
+                    "findings_count": len(report.findings),
+                    "report_path": report_path,
+                }
+                _sse("complete", json.dumps(result))
+                _buffer.clear()
+
+            except Exception as e:
+                _sse("error", json.dumps({"message": str(e)}))
+
+        elif self.path == "/v1/fix":
+            # Generate code fix suggestions from the last analysis
+            try:
+                if not _last_analysis:
+                    self._send(200, {
+                        "status": "no_analysis",
+                        "message": "Run /v1/analyze first.",
+                    })
+                    return
+
+                # Get the last report's findings
+                engine = RCAEngine()
+                trace_events = spans_to_tracer_events(_buffer.get_all() or [])
+
+                from inferra.pr_generator import PRGenerator
+                gen = PRGenerator()
+
+                # Rebuild report from last analysis or run fresh
+                findings = []
+                if _last_analysis.get("report_root_cause"):
+                    # Use stored context to generate fixes via LLM
+                    try:
+                        from inferra.llm_agent import get_llm_backend
+                        backend = get_llm_backend()
+                        if backend:
+                            fix_prompt = (
+                                f"Previous RCA found: {_last_analysis['report_root_cause']}\n"
+                                f"Summary: {_last_analysis.get('report_summary', '')}\n"
+                                f"Code context:\n{_last_analysis.get('code_context', '')[:3000]}\n\n"
+                                "Generate a concrete code fix. Output ONLY a unified diff (--- a/file, +++ b/file format). "
+                                "Include the exact file path and line numbers. Fix the root cause directly."
+                            )
+                            diff_text = backend.call(
+                                fix_prompt,
+                                system="You are a code repair agent. Output only unified diffs, no explanation.",
+                                max_tokens=2000,
+                            )
+                            self._send(200, {
+                                "status": "fix_generated",
+                                "root_cause": _last_analysis["report_root_cause"],
+                                "diff": diff_text or "Unable to generate fix",
+                                "source_files": _last_analysis.get("source_map_keys", []),
+                            })
+                        else:
+                            self._send(200, {
+                                "status": "no_llm",
+                                "message": "No LLM backend available to generate fixes",
+                            })
+                    except Exception as e:
+                        self._send(200, {
+                            "status": "error",
+                            "message": f"Fix generation failed: {e}",
+                        })
+                else:
+                    self._send(200, {
+                        "status": "no_context",
+                        "message": "Insufficient analysis context. Run /v1/analyze first.",
+                    })
+
+            except Exception as e:
+                self._send(500, {"error": str(e)})
+
         else:
             self._send(404, {"error": "not found"})
 
@@ -1156,6 +1317,12 @@ def serve(host="0.0.0.0", port=4318, project=None):
     try:
         from inferra.storage import Storage
         _storage = Storage()
+        # Restore last analysis session for /v1/ask continuity across restarts
+        restored = _storage.load_session("latest")
+        if restored:
+            global _last_analysis
+            _last_analysis = restored
+            log.info("  Restored session %s from previous run", restored.get("session_id", "?"))
     except Exception as e:
         log.warning("Storage disabled: %s", e)
         _storage = None
@@ -1176,13 +1343,16 @@ def serve(host="0.0.0.0", port=4318, project=None):
 
     server = HTTPServer((host, port), OTLPHandler)
     log.info("Inferra OTLP receiver listening on %s:%d", host, port)
-    log.info("  POST /v1/traces      — Accept OTLP spans")
-    log.info("  POST /v1/analyze     — Trigger RCA on buffered spans%s",
+    log.info("  POST /v1/traces          — Accept OTLP spans")
+    log.info("  POST /v1/analyze         — Trigger RCA on buffered spans%s",
              " (+ code correlation)" if _indexer else "")
-    log.info("  GET  /v1/traces      — View buffered spans")
-    log.info("  GET  /v1/history     — View analysis history")
-    log.info("  GET  /v1/regressions — Detect performance regressions")
-    log.info("  GET  /healthz        — Health check")
+    log.info("  POST /v1/analyze/stream  — Streaming SSE analysis")
+    log.info("  POST /v1/ask             — Follow-up questions")
+    log.info("  POST /v1/fix             — Generate code fix diffs")
+    log.info("  GET  /v1/traces          — View buffered spans")
+    log.info("  GET  /v1/history         — View analysis history")
+    log.info("  GET  /v1/regressions     — Detect performance regressions")
+    log.info("  GET  /healthz            — Health check")
     log.info("")
     log.info("Configure your app:")
     log.info("  export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:%d", port)
