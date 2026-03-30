@@ -130,7 +130,31 @@ def analyze(project_path, llm=None, model=None, output_path=None, skip_search=Tr
     if output_path.endswith(".json"):
         save_report_json(project_path, stats, trace_data, output_path)
     elif output_path.endswith(".html"):
-        generate_html_report(project_path, stats, trace_data, output_path)
+        # Run security scan for richer report
+        sec_findings = []
+        try:
+            from inferra.security_agent import SecurityAgent
+            sec = SecurityAgent()
+            for root_dir, dirs, files in os.walk(project_path):
+                dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '__pycache__', '.venv', 'venv')]
+                for fname in files:
+                    if fname.endswith('.py'):
+                        fpath = os.path.join(root_dir, fname)
+                        rel = os.path.relpath(fpath, project_path)
+                        if '/test' in rel or rel.startswith('scripts/'):
+                            continue
+                        try:
+                            content = open(fpath).read()
+                            sec_findings.extend(sec._scan_file_patterns(fpath, content))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        generate_html_report(
+            project_path, stats, trace_data, output_path,
+            indexer=indexer, security_findings=sec_findings,
+        )
         log.info("HTML report saved: %s", output_path)
     else:
         save_report_markdown(project_path, stats, trace_data, output_path)
