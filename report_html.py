@@ -492,6 +492,48 @@ def generate_html_report(project_path, stats, trace_data, output_path,
         h += '<div class="card"><h2><span class="icon">🔒</span> Security</h2>'
         h += '<p style="color:var(--success);font-size:.9rem">✅ No security vulnerabilities detected.</p></div>\n'
 
+    # ═══ Static Issues (from call graph analysis) ═══
+    if trace_data and trace_data.get("static_issues"):
+        issues = trace_data["static_issues"]
+        crits = [i for i in issues if i["severity"] == "critical"]
+        warns = [i for i in issues if i["severity"] == "warning"]
+        infos = [i for i in issues if i["severity"] == "info"]
+
+        h += '<div class="card" style="border-color:rgba(251,191,36,.2)">'
+        h += f'<h2><span class="icon">🔍</span> Structural Issues '
+        h += f'<span class="label">{len(issues)} found</span></h2>\n'
+
+        if crits:
+            h += '<h3 style="font-size:.85rem;margin:.6rem 0 .3rem;color:#f87171;font-weight:600">Critical</h3>\n'
+            for issue in crits:
+                h += '<div class="finding finding-sec">'
+                h += f'<div class="agent"><span class="badge b-err">{_esc(issue["type"].upper())}</span> {_esc(issue["summary"])}</div>\n'
+                h += '<div class="evidence">'
+                h += f'<span>📍 <code>{_esc(issue["source"])}</code></span>'
+                for ev in issue.get("evidence", [])[:3]:
+                    h += f'<span>• {_esc(ev[:130])}</span>'
+                h += '</div></div>\n'
+
+        if warns:
+            h += '<h3 style="font-size:.85rem;margin:.6rem 0 .3rem;color:#fbbf24;font-weight:600">Warnings</h3>\n'
+            for issue in warns:
+                h += '<div class="finding">'
+                h += f'<div class="agent"><span class="badge b-warn">{_esc(issue["type"].upper())}</span> {_esc(issue["summary"])}</div>\n'
+                h += '<div class="evidence">'
+                for ev in issue.get("evidence", [])[:2]:
+                    h += f'<span>• {_esc(ev[:130])}</span>'
+                h += '</div></div>\n'
+
+        if infos[:8]:  # cap to avoid too many dead code items
+            h += '<details><summary style="cursor:pointer;font-size:.85rem;color:var(--muted);margin:.4rem 0">ℹ️ Info items</summary>\n'
+            for issue in infos[:8]:
+                h += f'<div style="font-size:.82rem;color:var(--muted);padding:.15rem 0 .15rem 1rem">• {_esc(issue["summary"])} — <code>{_esc(issue["source"])}</code></div>\n'
+            if len(infos) > 8:
+                h += f'<div style="font-size:.82rem;color:var(--muted);padding:.15rem 0 .15rem 1rem">… and {len(infos)-8} more</div>\n'
+            h += '</details>\n'
+
+        h += '</div>\n'
+
     # ═══ Trace Results ═══
     if trace_data:
         successes = trace_data.get("successes", [])

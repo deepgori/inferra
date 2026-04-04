@@ -138,7 +138,7 @@ def analyze(project_path, llm=None, model=None, output_path=None, skip_search=Tr
             for root_dir, dirs, files in os.walk(project_path):
                 dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '__pycache__', '.venv', 'venv')]
                 for fname in files:
-                    if fname.endswith('.py'):
+                    if fname.endswith(('.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java')):
                         fpath = os.path.join(root_dir, fname)
                         rel = os.path.relpath(fpath, project_path)
                         if '/test' in rel or rel.startswith('scripts/'):
