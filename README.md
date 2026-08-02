@@ -1,4 +1,4 @@
-# Inferra — Autonomous Debugging via Trace-to-Code Correlation
+# Inferra - Autonomous Debugging via Trace-to-Code Correlation
 
 [![Tests](https://github.com/deepgori/inferra/actions/workflows/tests.yml/badge.svg)](https://github.com/deepgori/inferra/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/inferra)](https://pypi.org/project/inferra/)
