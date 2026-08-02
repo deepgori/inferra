@@ -565,13 +565,15 @@ class TestFindingTypes(unittest.TestCase):
             "CIRCULAR_DEPENDENCY", "HIGH_FAN_OUT", "DEAD_CODE", "TIGHT_COUPLING",
             "DEEP_CALL_CHAIN", "SQL_INJECTION", "HARDCODED_SECRET",
             "UNSAFE_DESERIALIZATION", "SSRF", "PATH_TRAVERSAL", "MISSING_AUTH",
+            # v0.5.0 additions
+            "XSS", "OPEN_REDIRECT", "WEAK_CRYPTO",
             "UNKNOWN",
         ]
         for t in required:
             self.assertTrue(hasattr(FindingType, t), f"Missing FindingType.{t}")
 
     def test_total_count(self):
-        self.assertEqual(len(FindingType), 20)
+        self.assertEqual(len(FindingType), 23)
 
 
 if __name__ == "__main__":
