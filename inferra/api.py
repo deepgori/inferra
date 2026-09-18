@@ -23,13 +23,15 @@ log = logging.getLogger("inferra")
 class AnalysisResult:
     """Structured result from inferra.analyze()."""
 
-    def __init__(self, stats, trace_data, report_path):
+    def __init__(self, stats, trace_data, report_path, project_name="project"):
         self.stats = stats
         self.trace_data = trace_data
         self.report_path = report_path
+        self.project_name = project_name
 
         # Extract key fields
         rca = trace_data.get("report") if trace_data else None
+        self.report = rca
         self.root_cause = rca.root_cause if rca else "No issues detected"
         self.confidence = f"{rca.confidence:.0%}" if rca else "N/A"
         self.severity = rca.severity.value if rca else "none"
@@ -50,6 +52,13 @@ class AnalysisResult:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             print("No report file available.")
+
+    def file_github_issue(self, repo, user_id=None, labels=None):
+        """File this diagnosis as a GitHub issue via Composio. Returns a FiledIssue, or None if nothing was diagnosed."""
+        if self.report is None:
+            return None
+        from inferra.github_issues import GitHubIssueFiler
+        return GitHubIssueFiler(user_id=user_id).file(self.report, repo, self.project_name, labels=labels)
 
     def __repr__(self):
         return (
@@ -111,7 +120,7 @@ def analyze(project_path, llm=None, model=None, output_path=None, skip_search=Tr
     # Step 1: Index
     engine, indexer, stats = analyze_codebase(project_path)
     if engine is None:
-        return AnalysisResult(stats or {}, None, None)
+        return AnalysisResult(stats or {}, None, None, project_name)
 
     # Step 2: Search (skip by default in API mode)
     if not skip_search:
@@ -162,4 +171,4 @@ def analyze(project_path, llm=None, model=None, output_path=None, skip_search=Tr
     _section("Analysis complete")
     log.info("Report: %s", os.path.abspath(output_path))
 
-    return AnalysisResult(stats, trace_data, output_path)
+    return AnalysisResult(stats, trace_data, output_path, project_name)

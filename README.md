@@ -65,6 +65,24 @@ print(report.root_cause)   # "Sequential pipeline with blocking I/O..."
 report.open()              # Opens HTML report in browser
 ```
 
+### File diagnoses as GitHub issues
+
+Inferra can open a GitHub issue containing the root cause, source locations, findings and recommendations, using [Composio](https://composio.dev) to handle GitHub authorization.
+
+```bash
+pip install 'inferra[github]'
+export COMPOSIO_API_KEY=ak_...      # from dashboard.composio.dev
+
+inferra analyze ./my_project --file-issue owner/repo
+```
+
+The first run prints a link to connect your GitHub account. Re-running on an unchanged problem comments on the existing open issue instead of filing a duplicate: each issue carries a fingerprint built from the source locations and finding types, not the LLM's wording, which varies between runs.
+
+```python
+issue = report.file_github_issue("owner/repo")
+print(issue.url, issue.duplicate)
+```
+
 ## The Problem
 
 When a production API is slow, observability tools tell you:
@@ -246,6 +264,9 @@ inferra serve --project <path> [--llm groq|claude|ollama] [--model <name>] [--po
 # Static analysis mode (code review)
 inferra analyze <path> [--llm groq|claude|ollama] [--model <name>] [--output report.html]
 
+# File the diagnosis as a GitHub issue (needs inferra[github])
+inferra analyze <path> --file-issue owner/repo [--issue-label bug]
+
 # Help
 inferra --help
 inferra analyze --help
@@ -263,6 +284,8 @@ inferra serve --help
 | `INFERRA_LLM_TIMEOUT` | Optional | LLM timeout in seconds (default: 30) |
 | `INFERRA_LLM_RETRIES` | Optional | LLM retry count (default: 1) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | For your app | Set to `http://localhost:4318` |
+| `COMPOSIO_API_KEY` | For `--file-issue` | Get from [dashboard.composio.dev](https://dashboard.composio.dev) |
+| `INFERRA_COMPOSIO_USER_ID` | Optional | Composio user whose GitHub connection is used (default: your OS username) |
 
 ## Benchmarks
 

@@ -38,6 +38,10 @@ def main():
                            help="Output path (.html, .json, or .md)")
     analyze_p.add_argument("--no-search", action="store_true",
                            help="Skip interactive search prompt")
+    analyze_p.add_argument("--file-issue", metavar="OWNER/REPO", default=None,
+                           help="File the diagnosis as a GitHub issue via Composio")
+    analyze_p.add_argument("--issue-label", action="append", default=None,
+                           help="Label to add to the filed issue (repeatable)")
 
     # ── inferra serve ────────────────────────────────────────────────
     serve_p = sub.add_parser("serve", help="Start OTLP receiver for live tracing")
@@ -76,11 +80,35 @@ def main():
 
     elif args.command == "analyze":
         from inferra.api import analyze
-        analyze(
+        result = analyze(
             project_path=args.path,
             output_path=args.output,
             skip_search=args.no_search,
         )
+        if args.file_issue:
+            _file_issue(result, args.file_issue, args.issue_label)
+
+
+def _file_issue(result, repo, labels):
+    if result.report is None:
+        print("   ℹ️  No diagnosis to file.")
+        return
+
+    from inferra.github_issues import GitHubIssueFiler, GitHubNotConnected, IssueFilingError
+    try:
+        filer = GitHubIssueFiler()
+        url = filer.connect_url()
+        if url:
+            print(f"   🔗 Connect GitHub so Inferra can file issues: {url}")
+            print("   Waiting for authorization (up to 3 minutes)...")
+            filer.wait_for_connection()
+        issue = filer.file(result.report, repo, result.project_name, labels=labels)
+    except (ImportError, RuntimeError, ValueError, GitHubNotConnected, IssueFilingError) as exc:
+        print(f"   ❌ Could not file issue: {exc}")
+        sys.exit(1)
+
+    verb = "Updated existing" if issue.duplicate else "Filed"
+    print(f"   🐛 {verb} issue #{issue.number}: {issue.url}")
 
 
 if __name__ == "__main__":
